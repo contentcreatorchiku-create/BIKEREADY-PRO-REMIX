@@ -1,0 +1,22 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.netlify.bikeready_pro.twa",
+      "sha256_cert_fingerprints": [
+        "1D:6B:8F:EC:D3:9A:A2:A1:71:0A:18:98:EF:81:CB:7F:84:FA:A4:A5:32:1A:9F:26:BA:04:AA:BC:7F:97:C4:89"
+      ]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.bikeready.app",
+      "sha256_cert_fingerprints": [
+        "1D:6B:8F:EC:D3:9A:A2:A1:71:0A:18:98:EF:81:CB:7F:84:FA:A4:A5:32:1A:9F:26:BA:04:AA:BC:7F:97:C4:89"
+      ]
+    }
+  }
+]

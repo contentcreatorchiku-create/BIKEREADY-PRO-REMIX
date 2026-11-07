@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Remix Remix Remix Remix BikeReady - Workshop Management System",
+  "description": "Complete motorcycle repair and workshop management system with job cards, inventory, invoices, UPI payments, and Udhaar ledger.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

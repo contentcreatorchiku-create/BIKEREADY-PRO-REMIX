@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>BikeReady - Workshop Management System</title>
+    <meta name="description" content="Complete motorcycle repair and workshop management system with job cards, inventory, invoices, UPI payments, and Udhaar ledger." />
+    <meta name="theme-color" content="#f59e0b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BikeReady" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <meta property="og:title" content="BikeReady - Workshop Management System" />
+    <meta property="og:description" content="Complete motorcycle repair and workshop management system with job cards, inventory, invoices, UPI payments, and Udhaar ledger." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <style>
+      /* Completely suppress any Netlify injected badges, iframes, and overlays */
+      body > *:not(#root):not(script):not(style):not(link) {
+        display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+        position: fixed !important;
+        left: -99999px !important;
+        width: 0 !important;
+        height: 0 !important;
+      }
+      iframe[src*="netlify"],
+      div[class*="netlify"],
+      a[href*="netlify"],
+      #netlify-identity-widget,
+      [data-netlify-deploy-id],
+      .netlify-badge,
+      netlify-cdp-drawer,
+      div[id*="netlify"] {
+        display: none !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        visibility: hidden !important;
+        width: 0 !important;
+        height: 0 !important;
+        position: absolute !important;
+        left: -9999px !important;
+      }
+      body {
+        padding-bottom: env(safe-area-inset-bottom, 20px);
+      }
+    </style>
+    <script>
+      // Immediate and recurring DOM observer + shadow-DOM purge to remove external badges & elements
+      (function() {
+        var selectors = [
+          'iframe[src*="netlify"]',
+          'div[class*="netlify"]',
+          'a[href*="netlify"]',
+          '#netlify-identity-widget',
+          '.netlify-badge',
+          '[data-netlify-deploy-id]',
+          'netlify-cdp-drawer',
+          'div[id*="netlify"]'
+        ];
+        function removeExtraneousBodyChildren() {
+          if (!document.body) return;
+          var allowedTags = ['SCRIPT', 'STYLE', 'LINK'];
+          var children = Array.prototype.slice.call(document.body.children);
+          for (var i = 0; i < children.length; i++) {
+            var child = children[i];
+            if (child.id === 'root') continue;
+            if (allowedTags.indexOf(child.tagName) !== -1) continue;
+            try {
+              if (child.remove) {
+                child.remove();
+              } else if (child.parentNode) {
+                child.parentNode.removeChild(child);
+              }
+            } catch(e) {}
+          }
+        }
+        function purgeNetlifyBadge() {
+          removeExtraneousBodyChildren();
+          selectors.forEach(function(sel) {
+            document.querySelectorAll(sel).forEach(function(el) {
+              if (el && el.parentNode) {
+                el.parentNode.removeChild(el);
+              }
+            });
+          });
+          try {
+            document.querySelectorAll('*').forEach(function(el) {
+              if (el.shadowRoot) {
+                selectors.forEach(function(sel) {
+                  el.shadowRoot.querySelectorAll(sel).forEach(function(selEl) {
+                    if (selEl && selEl.parentNode) selEl.parentNode.removeChild(selEl);
+                  });
+                });
+              }
+            });
+          } catch(e) {}
+        }
+        purgeNetlifyBadge();
+        setInterval(purgeNetlifyBadge, 200);
+        if (window.MutationObserver) {
+          var observer = new MutationObserver(function() {
+            purgeNetlifyBadge();
+          });
+          observer.observe(document.documentElement, { childList: true, subtree: true });
+        }
+      })();
+
+      if ('caches' in window) {
+        caches.keys().then(function(keys) {
+          keys.forEach(function(k) {
+            if (k !== 'bikeready-cache-v6') {
+              caches.delete(k);
+            }
+          });
+        });
+      }
+
+      if ('serviceWorker' in navigator) {
+        // Immediate registration for PWABuilder & automated PWA test runners
+        navigator.serviceWorker.register('/sw.js').then(function(reg) {
+          if (reg.update) reg.update();
+          console.log('BikeReady Service Worker registered with scope:', reg.scope);
+        }).catch(function(err) {
+          console.log('ServiceWorker registration error:', err);
+        });
+      }
+    </script>
+  </head>
+  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-amber-500 selection:text-slate-950">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

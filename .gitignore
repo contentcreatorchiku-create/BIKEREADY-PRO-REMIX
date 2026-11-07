@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+.android-sdk/
+android/
+*.apk
+*.aab
+bun.lock
+.aistudio/
+
