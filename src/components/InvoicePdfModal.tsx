@@ -41,6 +41,7 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
 }) => {
   const [qrUrl, setQrUrl] = useState<string>('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [copiedBill, setCopiedBill] = useState(false);
 
   useEffect(() => {
     if (jobCard && shop) {
@@ -200,69 +201,61 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
       // Subtotal & Financial Breakdown Box
       doc.setFontSize(8.5);
       doc.setFont('helvetica', 'normal');
-      doc.text('Subtotal:', 340, y);
+      doc.text('Subtotal (Parts + Labour + Consumables + Outside Work):', 310, y);
       doc.text(`INR ${subtotal}`, 490, y);
       y += 14;
 
       if (discount > 0) {
         doc.setTextColor(220, 38, 38);
-        doc.text('Discount Applied:', 340, y);
+        doc.text('Less: Discount:', 310, y);
         doc.text(`-INR ${discount}`, 490, y);
         doc.setTextColor(30, 41, 59);
         y += 14;
       }
 
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10.5);
-      doc.text('GROSS TOTAL BILL:', 340, y);
+      doc.setFontSize(10);
+      doc.text('GROSS TOTAL BILL:', 310, y);
       doc.text(`INR ${grossBillTotal}`, 490, y);
-      y += 16;
+      y += 15;
 
       if (advancePaid > 0) {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(8.5);
         doc.setTextColor(16, 185, 129);
-        doc.text('Less Advance Paid at Intake:', 340, y);
+        doc.text('Less: Advance Paid at Intake:', 310, y);
         doc.text(`-INR ${advancePaid}`, 490, y);
         doc.setTextColor(30, 41, 59);
         y += 14;
 
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10.5);
-        doc.text('NET PAYABLE AT DELIVERY:', 340, y);
+        doc.setFontSize(10);
+        doc.text('NET PAYABLE AT DELIVERY:', 310, y);
         doc.text(`INR ${netPayable}`, 490, y);
-        y += 16;
+        y += 15;
       }
 
       // Settlement Breakdown
       doc.setFontSize(8);
       doc.setFont('helvetica', 'normal');
-      if (advancePaid > 0) {
-        doc.text(`• Advance Paid: INR ${advancePaid}`, 340, y);
-        y += 12;
-      }
-      if (cashCollected > 0) {
-        doc.text(`• Cash Collected at Handover: INR ${cashCollected}`, 340, y);
-        y += 12;
-      }
-      if (upiCollected > 0) {
-        doc.text(`• UPI Payment: INR ${upiCollected}${jobCard.upi_ref_number ? ` (Ref: ${jobCard.upi_ref_number})` : ''}`, 340, y);
-        y += 12;
-      }
+      doc.text(`Cash Paid at Delivery: INR ${cashCollected}`, 310, y);
+      y += 12;
+      doc.text(`UPI Paid at Delivery: INR ${upiCollected}${jobCard.upi_ref_number ? ` (Ref: ${jobCard.upi_ref_number})` : ''}`, 310, y);
+      y += 12;
+      doc.setFont('helvetica', 'bold');
+      doc.text(`TOTAL PAID OVERALL: INR ${totalPaid}`, 310, y);
+      y += 12;
       if (khataDue > 0) {
         doc.setTextColor(220, 38, 38);
-        doc.text(`• Transferred to Customer Khata (Udhaar): INR ${khataDue}`, 340, y);
+        doc.text(`TRANSFERRED TO KHATA (UDHAAR DUE): INR ${khataDue}`, 310, y);
         doc.setTextColor(30, 41, 59);
         y += 12;
       }
-      doc.setFont('helvetica', 'bold');
-      doc.text(`• Total Paid for Job: INR ${totalPaid}`, 340, y);
-      y += 14;
 
       // Gate Pass Badge on PDF
       doc.setFillColor(236, 253, 245);
       doc.setDrawColor(16, 185, 129);
-      doc.roundedRect(40, y + 6, 260, 45, 6, 6, 'FD');
+      doc.roundedRect(40, y + 6, 250, 45, 6, 6, 'FD');
       doc.setTextColor(5, 150, 105);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9);
@@ -271,12 +264,16 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
       doc.setFontSize(7.5);
       doc.text('Vehicle road tested, verified & released to customer.', 52, y + 38);
 
-      // Embed QR code image if available
+      // Embed QR code image if available (with try-catch safety)
       if (qrUrl) {
-        doc.addImage(qrUrl, 'PNG', 440, y + 6, 70, 70);
-        doc.setFontSize(7);
-        doc.setTextColor(100, 116, 139);
-        doc.text(`Scan UPI: ${shop.upi_id}`, 430, y + 84);
+        try {
+          doc.addImage(qrUrl, 'PNG', 440, y + 6, 70, 70);
+          doc.setFontSize(7);
+          doc.setTextColor(100, 116, 139);
+          doc.text(`Scan UPI: ${shop.upi_id}`, 430, y + 84);
+        } catch (qrErr) {
+          console.warn('QR code embedding in PDF failed, continuing without QR:', qrErr);
+        }
       }
 
       // Footer
@@ -306,8 +303,6 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
 
   const smsText = generateSimpleSmsText(shop, jobCard, 'bill');
   const smsDirectUrl = generateSmsLink(jobCard.customer?.phone || '', smsText);
-
-  const [copiedBill, setCopiedBill] = useState(false);
 
   const handleCopyBill = async () => {
     try {
@@ -535,38 +530,47 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
                 </div>
                 {discount > 0 && (
                   <div className="flex justify-between gap-4 text-rose-400 text-[11px]">
-                    <span>Discount:</span>
+                    <span>Less: Discount:</span>
                     <span className="font-mono">-₹{discount}</span>
                   </div>
                 )}
                 <div className="flex justify-between gap-4 text-slate-200 font-bold border-t border-slate-800/80 pt-1">
-                  <span>Gross Total Bill:</span>
+                  <span>GROSS TOTAL BILL:</span>
                   <span className="font-mono text-amber-400 font-bold">₹{grossBillTotal}</span>
                 </div>
                 {advancePaid > 0 && (
                   <div className="flex justify-between gap-4 text-emerald-400 text-[11px]">
-                    <span>Advance Paid (Intake):</span>
+                    <span>Less: Advance Paid at Intake:</span>
                     <span className="font-mono">-₹{advancePaid}</span>
                   </div>
                 )}
-                {advancePaid > 0 && (
-                  <div className="flex justify-between gap-4 text-slate-100 font-extrabold text-xs border-t border-slate-800/80 pt-1">
-                    <span>Net Paid/Due at Handover:</span>
-                    <span className="font-mono text-white">₹{netPayable}</span>
+                <div className="flex justify-between gap-4 text-slate-100 font-extrabold text-xs border-t border-slate-800/80 pt-1">
+                  <span>NET PAYABLE AT DELIVERY:</span>
+                  <span className="font-mono text-white">₹{netPayable}</span>
+                </div>
+                <div className="flex justify-between gap-4 text-slate-300 text-[11px]">
+                  <span>Cash Paid at Delivery:</span>
+                  <span className="font-mono text-slate-200">₹{cashCollected}</span>
+                </div>
+                <div className="flex justify-between gap-4 text-cyan-400 text-[11px]">
+                  <span>UPI Paid at Delivery:</span>
+                  <span className="font-mono">₹{upiCollected}</span>
+                </div>
+                <div className="flex justify-between gap-4 text-emerald-400 font-bold text-xs border-t border-slate-800/80 pt-1">
+                  <span>TOTAL PAID OVERALL:</span>
+                  <span className="font-mono">₹{totalPaid}</span>
+                </div>
+                {khataDue > 0 && (
+                  <div className="flex justify-between gap-4 text-rose-400 font-bold text-xs">
+                    <span>TRANSFERRED TO KHATA (UDHAAR DUE):</span>
+                    <span className="font-mono">₹{khataDue}</span>
                   </div>
                 )}
-                <div className="text-[10px] text-slate-400 border-t border-slate-800/80 pt-1">
-                  <span>Settlement: </span>
-                  {advancePaid > 0 && <span className="text-emerald-400">Adv: ₹{advancePaid} • </span>}
-                  <span className="text-slate-300">Cash: ₹{cashCollected}</span> •{' '}
-                  <span className="text-indigo-400">UPI: ₹{upiCollected}</span>
-                  {khataDue > 0 && <span className="text-amber-400 font-bold"> • Udhar: ₹{khataDue}</span>}
-                  {jobCard.upi_ref_number && (
-                    <span className="block text-[10px] text-indigo-400 font-mono mt-0.5">
-                      UPI Ref/UTR: {jobCard.upi_ref_number}
-                    </span>
-                  )}
-                </div>
+                {jobCard.upi_ref_number && (
+                  <div className="text-[10px] text-cyan-400/80 font-mono text-right">
+                    UPI Ref/UTR: {jobCard.upi_ref_number}
+                  </div>
+                )}
               </div>
 
               {qrUrl && (

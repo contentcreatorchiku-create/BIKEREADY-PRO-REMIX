@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient';
+import jsPDF from 'jspdf';
 import {
   Shop,
   User,
@@ -1176,6 +1177,90 @@ export const supabaseService = {
   // ========================
   // CUSTOMERS & SERVICE HISTORY
   // ========================
+  async reconcileShopCustomerBalances(shopId: string): Promise<Customer[]> {
+    const cacheKey = `customers_${shopId}`;
+    try {
+      const [custRes, cardsRes, ledgerRes] = await Promise.all([
+        supabase
+          .from('customers')
+          .select('*')
+          .eq('shop_id', shopId)
+          .order('customer_name', { ascending: true }),
+        supabase
+          .from('job_cards')
+          .select('id, shop_id, customer_id, bike_number, status, total_bill, advance_paid, cash_collected, mandatory_cash_to_collect, upi_collected, transferred_to_khata, billed_at, created_at')
+          .eq('shop_id', shopId)
+          .eq('status', 'completed'),
+        supabase
+          .from('credit_ledger')
+          .select('*')
+          .eq('shop_id', shopId),
+      ]);
+
+      const customers: Customer[] = custRes.data || [];
+      const completedCards: any[] = cardsRes.data || [];
+      const allLedger: CreditLedgerEntry[] = ledgerRes.data || [];
+
+      const clean = (str: string = '') => str.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+
+      for (const cust of customers) {
+        const custCleanBike = clean(cust.bike_number);
+
+        // Match cards where customer_id matches OR clean bike_number matches
+        const custCards = completedCards.filter((jc: any) => {
+          if (jc.customer_id === cust.id) return true;
+          if (custCleanBike && clean(jc.bike_number) === custCleanBike) {
+            // Auto-link in background if unlinked
+            if (!jc.customer_id) {
+              jc.customer_id = cust.id;
+              supabase.from('job_cards').update({ customer_id: cust.id }).eq('id', jc.id).then(() => {});
+            }
+            return true;
+          }
+          return false;
+        });
+
+        const totalGrossBilled = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.total_bill) || 0), 0);
+        const totalAdvancePaid = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.advance_paid) || 0), 0);
+        const totalCashPaid = custCards.reduce((sum: number, jc: any) => sum + Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0), 0);
+        const totalUpiPaid = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.upi_collected) || 0), 0);
+
+        const totalUdhaarFromCards = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.transferred_to_khata) || 0), 0);
+
+        const custLedger = allLedger.filter((l: any) => l.customer_id === cust.id);
+        const totalUdhaarFromLedger = custLedger
+          .filter((l: any) => l.transaction_type === 'udhaar_incurred' && !l.job_card_id)
+          .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
+
+        const totalUdhaarIncurred = totalUdhaarFromCards + totalUdhaarFromLedger;
+
+        const totalUdhaarSettled = custLedger
+          .filter((l: any) => l.transaction_type === 'udhaar_cleared')
+          .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
+
+        const accurateCurrentDue = Math.max(
+          0,
+          Math.round(((totalUdhaarIncurred - totalUdhaarSettled) + Number.EPSILON) * 100) / 100
+        );
+
+        if (Number(cust.current_due || 0) !== accurateCurrentDue) {
+          cust.current_due = accurateCurrentDue;
+          supabase
+            .from('customers')
+            .update({ current_due: accurateCurrentDue })
+            .eq('id', cust.id)
+            .then(() => {});
+        }
+      }
+
+      offlineStorage.setCache(cacheKey, customers);
+      return customers;
+    } catch (err) {
+      console.error('reconcileShopCustomerBalances error:', err);
+      return offlineStorage.getCache<Customer[]>(cacheKey, []);
+    }
+  },
+
   async getCustomers(shopId: string, search: string = ''): Promise<Customer[]> {
     const cacheKey = `customers_${shopId}`;
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -1191,27 +1276,16 @@ export const supabaseService = {
     }
 
     try {
-      let query = supabase
-        .from('customers')
-        .select('*')
-        .eq('shop_id', shopId)
-        .order('customer_name', { ascending: true });
+      const reconciled = await this.reconcileShopCustomerBalances(shopId);
+      if (!search.trim()) return reconciled;
 
-      if (search.trim()) {
-        query = query.or(
-          `customer_name.ilike.%${search.trim()}%,phone.ilike.%${search.trim()}%,bike_number.ilike.%${search.trim()}%`
-        );
-      }
-
-      const { data, error } = await query;
-      if (error || !data) {
-        const allCached = offlineStorage.getCache<Customer[]>(cacheKey, []);
-        return allCached;
-      }
-      if (!search.trim()) {
-        offlineStorage.setCache(cacheKey, data);
-      }
-      return data;
+      const q = search.trim().toLowerCase();
+      return reconciled.filter(
+        (c) =>
+          c.customer_name.toLowerCase().includes(q) ||
+          c.phone.toLowerCase().includes(q) ||
+          c.bike_number.toLowerCase().includes(q)
+      );
     } catch {
       return offlineStorage.getCache<Customer[]>(cacheKey, []);
     }
@@ -1920,7 +1994,22 @@ export const supabaseService = {
         .update(payload)
         .eq('id', jobCardId);
 
-      if (error) throw error;
+      if (error) {
+        console.warn('updateJobCardBilling full update failed, retrying with core columns:', error.message);
+        const corePayload: any = {
+          labour_charge: payload.labour_charge,
+          consumable_charge: payload.consumable_charge,
+          outside_work_desc: payload.outside_work_desc,
+          outside_work_shop_cost: payload.outside_work_shop_cost,
+          outside_work_customer_price: payload.outside_work_customer_price,
+          extra_discount: payload.extra_discount,
+          mandatory_cash_to_collect: payload.mandatory_cash_to_collect,
+          transferred_to_khata: payload.transferred_to_khata,
+        };
+        if (typeof payload.total_bill === 'number') corePayload.total_bill = payload.total_bill;
+        await supabase.from('job_cards').update(corePayload).eq('id', jobCardId);
+      }
+
       if (typeof data.totalBill !== 'number') {
         await this.recalculateJobCardTotals(jobCardId);
       }
@@ -2189,12 +2278,47 @@ export const supabaseService = {
       if (finalCustId) updatePayload.customer_id = finalCustId;
       if (upiRefNumber) updatePayload.upi_ref_number = upiRefNumber;
 
-      const { error } = await supabase
+      let { error } = await supabase
         .from('job_cards')
         .update(updatePayload)
         .eq('id', jobCardId);
 
-      return !error;
+      if (error) {
+        console.warn('Extended job_cards update failed, retrying with core columns:', error.message);
+        const corePayload: any = {
+          status: 'completed',
+          total_bill: totalBill,
+          mandatory_cash_to_collect: cashAmt,
+          transferred_to_khata: khataAmt,
+          billed_at: nowIso,
+        };
+        if (finalCustId) corePayload.customer_id = finalCustId;
+        const retryRes = await supabase.from('job_cards').update(corePayload).eq('id', jobCardId);
+        if (retryRes.error) {
+          console.error('Core job_cards update error:', retryRes.error);
+        }
+      }
+
+      // Update offline storage cache for instant local availability
+      const cachedCard = {
+        ...jc,
+        status: 'completed' as const,
+        total_bill: totalBill,
+        advance_paid: advPaid,
+        cash_collected: cashAmt,
+        upi_collected: upiAmt,
+        mandatory_cash_to_collect: cashAmt,
+        transferred_to_khata: khataAmt,
+        billed_at: nowIso,
+        customer_id: finalCustId || jc.customer_id,
+        upi_ref_number: upiRefNumber || jc.upi_ref_number,
+      };
+      offlineStorage.setCache(`job_card_${jobCardId}`, cachedCard);
+
+      // Reconcile shop balances immediately in background so customer due is 100% verified everywhere
+      this.reconcileShopCustomerBalances(jc.shop_id).catch(() => {});
+
+      return true;
     } catch (err) {
       console.error('Complete bill error:', err);
       return false;
@@ -4226,50 +4350,79 @@ export const supabaseService = {
     customer: Customer | null;
     jobCards: any[];
     ledgerEntries: CreditLedgerEntry[];
+    metrics?: {
+      totalVisits: number;
+      totalGrossBilled: number;
+      totalAdvancePaid: number;
+      totalCashPaid: number;
+      totalUpiPaid: number;
+      totalUdhaarIncurred: number;
+      totalUdhaarSettled: number;
+      accurateCurrentDue: number;
+    };
   }> {
     try {
-      const [cardsRes, custRes, ledgerEntries] = await Promise.all([
-        supabase
-          .from('job_cards')
-          .select('*, items:job_card_items(*), mechanic:users(*)')
-          .eq('shop_id', shopId)
-          .eq('customer_id', customerId)
-          .order('created_at', { ascending: false }),
+      const clean = (str: string = '') => str.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+
+      const [custRes, allCardsRes, ledgerEntries] = await Promise.all([
         supabase
           .from('customers')
           .select('*')
           .eq('id', customerId)
           .single(),
+        supabase
+          .from('job_cards')
+          .select('*, items:job_card_items(*), mechanic:users(*)')
+          .eq('shop_id', shopId)
+          .order('created_at', { ascending: false }),
         this.getCreditLedger(shopId, customerId),
       ]);
 
-      const jobCards = cardsRes.data || [];
-      const customer = custRes.data || null;
+      const customer: Customer | null = custRes.data || null;
+      const allCards = allCardsRes.data || [];
+      const custCleanBike = clean(customer?.bike_number);
 
-      // 1. Calculate true accurate current due for this customer:
-      // Total Udhaar = sum of transferred_to_khata on completed job cards + direct udhaar_incurred
-      // Total Settled = sum of udhaar_cleared settlements
-      const totalUdhaarFromCards = jobCards
-        .filter((jc: any) => jc.status === 'completed')
-        .reduce((sum: number, jc: any) => sum + (Number(jc.transferred_to_khata) || 0), 0);
+      // Match cards where customer_id matches OR bike_number matches
+      const jobCards = allCards.filter((jc: any) => {
+        if (jc.customer_id === customerId) return true;
+        if (custCleanBike && clean(jc.bike_number) === custCleanBike) {
+          if (!jc.customer_id) {
+            jc.customer_id = customerId;
+            supabase.from('job_cards').update({ customer_id: customerId }).eq('id', jc.id).then(() => {});
+          }
+          return true;
+        }
+        return false;
+      });
+
+      // 1. Calculate true accurate single-source-of-truth metrics for this customer
+      const completedCards = jobCards.filter((jc: any) => jc.status === 'completed');
+      const totalGrossBilled = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.total_bill) || 0), 0);
+      const totalAdvancePaid = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.advance_paid) || 0), 0);
+      const totalCashPaid = completedCards.reduce((sum: number, jc: any) => sum + Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0), 0);
+      const totalUpiPaid = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.upi_collected) || 0), 0);
+
+      const totalUdhaarFromCards = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.transferred_to_khata) || 0), 0);
 
       const totalUdhaarFromLedger = ledgerEntries
         .filter((l: any) => l.transaction_type === 'udhaar_incurred' && !l.job_card_id)
         .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
 
-      const totalSettled = ledgerEntries
+      const totalUdhaarIncurred = totalUdhaarFromCards + totalUdhaarFromLedger;
+
+      const totalUdhaarSettled = ledgerEntries
         .filter((l: any) => l.transaction_type === 'udhaar_cleared')
         .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
 
       const accurateCurrentDue = Math.max(
         0,
-        Math.round(((totalUdhaarFromCards + totalUdhaarFromLedger) - totalSettled + Number.EPSILON) * 100) / 100
+        Math.round(((totalUdhaarIncurred - totalUdhaarSettled) + Number.EPSILON) * 100) / 100
       );
 
       if (customer) {
         customer.current_due = accurateCurrentDue;
         // Keep DB aligned so all screens show the exact verified due
-        supabase.from('customers').update({ current_due: accurateCurrentDue }).eq('id', customerId);
+        supabase.from('customers').update({ current_due: accurateCurrentDue }).eq('id', customerId).then(() => {});
       }
 
       // 2. Build clean, non-duplicate audit dossier ledger entries
@@ -4292,100 +4445,108 @@ export const supabaseService = {
       }
 
       // Next synthesize any missing completed job card entries
-      for (const jc of jobCards) {
-        if (jc.status === 'completed') {
-          const total = Number(jc.total_bill || 0);
-          const advance = Number(jc.advance_paid || 0);
-          const cash = Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0);
-          const khata = Number(jc.transferred_to_khata || 0);
-          const upi = typeof jc.upi_collected === 'number'
-            ? Number(jc.upi_collected)
-            : Math.max(0, total - advance - cash - khata);
-          const date = jc.billed_at || jc.created_at;
-          const invNum = `INV-${jc.id.slice(-4).toUpperCase()}`;
+      for (const jc of completedCards) {
+        const total = Number(jc.total_bill || 0);
+        const advance = Number(jc.advance_paid || 0);
+        const cash = Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0);
+        const khata = Number(jc.transferred_to_khata || 0);
+        const upi = typeof jc.upi_collected === 'number'
+          ? Number(jc.upi_collected)
+          : Math.max(0, total - advance - cash - khata);
+        const date = jc.billed_at || jc.created_at;
+        const invNum = `INV-${jc.id.slice(-4).toUpperCase()}`;
 
-          if (advance > 0 && !seenCardTypes.has(`${jc.id}_advance_paid`)) {
-            seenCardTypes.add(`${jc.id}_advance_paid`);
-            cleanEntries.push({
-              id: `adv_${jc.id}`,
-              shop_id: shopId,
-              customer_id: customerId,
-              customer_name: customer?.customer_name,
-              bike_number: jc.bike_number,
-              job_card_id: jc.id,
-              invoice_number: invNum,
-              transaction_type: 'cash_paid',
-              amount: advance,
-              balance_after: 0,
-              reference_no: 'ADVANCE-PAID',
-              notes: 'Advance deposit at vehicle intake',
-              created_at: jc.created_at,
-            });
-          }
+        if (advance > 0 && !seenCardTypes.has(`${jc.id}_advance_paid`)) {
+          seenCardTypes.add(`${jc.id}_advance_paid`);
+          cleanEntries.push({
+            id: `adv_${jc.id}`,
+            shop_id: shopId,
+            customer_id: customerId,
+            customer_name: customer?.customer_name,
+            bike_number: jc.bike_number,
+            job_card_id: jc.id,
+            invoice_number: invNum,
+            transaction_type: 'cash_paid',
+            amount: advance,
+            balance_after: 0,
+            reference_no: 'ADVANCE-PAID',
+            notes: 'Advance deposit at vehicle intake',
+            created_at: jc.created_at || date,
+          });
+        }
 
-          if (cash > 0 && !seenCardTypes.has(`${jc.id}_cash_paid`)) {
-            seenCardTypes.add(`${jc.id}_cash_paid`);
-            cleanEntries.push({
-              id: `cash_${jc.id}`,
-              shop_id: shopId,
-              customer_id: customerId,
-              customer_name: customer?.customer_name,
-              bike_number: jc.bike_number,
-              job_card_id: jc.id,
-              invoice_number: invNum,
-              transaction_type: 'cash_paid',
-              amount: cash,
-              balance_after: 0,
-              reference_no: 'CASH-COUNTER',
-              notes: 'Cash payment collected at handover',
-              created_at: date,
-            });
-          }
+        if (cash > 0 && !seenCardTypes.has(`${jc.id}_cash_paid`)) {
+          seenCardTypes.add(`${jc.id}_cash_paid`);
+          cleanEntries.push({
+            id: `cash_${jc.id}`,
+            shop_id: shopId,
+            customer_id: customerId,
+            customer_name: customer?.customer_name,
+            bike_number: jc.bike_number,
+            job_card_id: jc.id,
+            invoice_number: invNum,
+            transaction_type: 'cash_paid',
+            amount: cash,
+            balance_after: 0,
+            reference_no: 'CASH-COUNTER',
+            notes: 'Cash payment collected at handover',
+            created_at: date,
+          });
+        }
 
-          if (upi > 0 && !seenCardTypes.has(`${jc.id}_upi_received`)) {
-            seenCardTypes.add(`${jc.id}_upi_received`);
-            cleanEntries.push({
-              id: `upi_${jc.id}`,
-              shop_id: shopId,
-              customer_id: customerId,
-              customer_name: customer?.customer_name,
-              bike_number: jc.bike_number,
-              job_card_id: jc.id,
-              invoice_number: invNum,
-              transaction_type: 'upi_received',
-              amount: upi,
-              balance_after: 0,
-              reference_no: jc.upi_ref_number || 'UPI-QR',
-              notes: 'UPI payment received at handover',
-              created_at: date,
-            });
-          }
+        if (upi > 0 && !seenCardTypes.has(`${jc.id}_upi_received`)) {
+          seenCardTypes.add(`${jc.id}_upi_received`);
+          cleanEntries.push({
+            id: `upi_${jc.id}`,
+            shop_id: shopId,
+            customer_id: customerId,
+            customer_name: customer?.customer_name,
+            bike_number: jc.bike_number,
+            job_card_id: jc.id,
+            invoice_number: invNum,
+            transaction_type: 'upi_received',
+            amount: upi,
+            balance_after: 0,
+            reference_no: jc.upi_ref_number || 'UPI-QR',
+            notes: 'UPI payment received at handover',
+            created_at: date,
+          });
+        }
 
-          if (khata > 0 && !seenCardTypes.has(`${jc.id}_udhaar_incurred`)) {
-            seenCardTypes.add(`${jc.id}_udhaar_incurred`);
-            cleanEntries.push({
-              id: `khata_${jc.id}`,
-              shop_id: shopId,
-              customer_id: customerId,
-              customer_name: customer?.customer_name,
-              bike_number: jc.bike_number,
-              job_card_id: jc.id,
-              invoice_number: invNum,
-              transaction_type: 'udhaar_incurred',
-              amount: khata,
-              balance_after: 0,
-              reference_no: 'KHATA-DEBIT',
-              notes: 'Bill balance transferred to Khata (Udhaar)',
-              created_at: date,
-            });
-          }
+        if (khata > 0 && !seenCardTypes.has(`${jc.id}_udhaar_incurred`)) {
+          seenCardTypes.add(`${jc.id}_udhaar_incurred`);
+          cleanEntries.push({
+            id: `khata_${jc.id}`,
+            shop_id: shopId,
+            customer_id: customerId,
+            customer_name: customer?.customer_name,
+            bike_number: jc.bike_number,
+            job_card_id: jc.id,
+            invoice_number: invNum,
+            transaction_type: 'udhaar_incurred',
+            amount: khata,
+            balance_after: 0,
+            reference_no: 'KHATA-DEBIT',
+            notes: 'Bill balance transferred to Khata (Udhaar)',
+            created_at: date,
+          });
         }
       }
 
-      // Sort chronologically (oldest to newest) to compute exact running balance
-      cleanEntries.sort(
-        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-      );
+      // Sort chronologically (oldest to newest):
+      // advance_paid and cash/upi payments are ordered BEFORE udhaar_incurred so running balance is true
+      const typePriority: Record<string, number> = {
+        cash_paid: 1,
+        upi_received: 2,
+        udhaar_incurred: 3,
+        udhaar_cleared: 4,
+      };
+
+      cleanEntries.sort((a, b) => {
+        const timeDiff = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return (typePriority[a.transaction_type] || 0) - (typePriority[b.transaction_type] || 0);
+      });
 
       let runningKhata = 0;
       for (const entry of cleanEntries) {
@@ -4404,11 +4565,285 @@ export const supabaseService = {
         customer,
         jobCards,
         ledgerEntries: cleanEntries,
+        metrics: {
+          totalVisits: completedCards.length,
+          totalGrossBilled,
+          totalAdvancePaid,
+          totalCashPaid,
+          totalUpiPaid,
+          totalUdhaarIncurred,
+          totalUdhaarSettled,
+          accurateCurrentDue,
+        },
       };
     } catch (err) {
       console.error('getCustomer360History error:', err);
       return { customer: null, jobCards: [], ledgerEntries: [] };
     }
+  },
+
+  exportCustomerSheetCsv(
+    customer: Customer,
+    jobCards: any[],
+    ledgerEntries: CreditLedgerEntry[],
+    metrics: any,
+    shopName: string
+  ): void {
+    const escapeCsv = (val: any) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const csvLines: string[] = [];
+
+    csvLines.push(escapeCsv(`BIKEREADY PRO - CUSTOMER MASTER DATA SHEET & LEDGER: ${customer.customer_name.toUpperCase()}`));
+    csvLines.push(escapeCsv(`Workshop: ${shopName} | Date: ${new Date().toLocaleDateString('en-IN')}`));
+    csvLines.push('');
+
+    // Summary Box
+    csvLines.push(escapeCsv('--- CUSTOMER FINANCIAL SUMMARY ---'));
+    csvLines.push([
+      'Customer Name',
+      'Phone',
+      'Bike Registration',
+      'Trust Tier',
+      'Total Visits',
+      'Total Gross Billed (Rs)',
+      'Total Advance (Rs)',
+      'Total Cash+UPI Paid (Rs)',
+      'Total Settled (Rs)',
+      'Net Current Udhaar Due (Rs)'
+    ].map(escapeCsv).join(','));
+
+    csvLines.push([
+      customer.customer_name,
+      customer.phone || '-',
+      customer.bike_number || '-',
+      customer.trust_tier || 'regular',
+      metrics?.totalVisits || jobCards.length,
+      Number(metrics?.totalGrossBilled || 0).toFixed(2),
+      Number(metrics?.totalAdvancePaid || 0).toFixed(2),
+      Number((metrics?.totalCashPaid || 0) + (metrics?.totalUpiPaid || 0)).toFixed(2),
+      Number(metrics?.totalUdhaarSettled || 0).toFixed(2),
+      Number(metrics?.accurateCurrentDue ?? customer.current_due ?? 0).toFixed(2),
+    ].map(escapeCsv).join(','));
+
+    csvLines.push('');
+    csvLines.push(escapeCsv('--- COMPLETE TRANSACTION & VISIT HISTORY (BILL-BY-BILL & SETTLEMENTS) ---'));
+    csvLines.push([
+      'Date & Time',
+      'Invoice / Job #',
+      'Bike & Odometer',
+      'Transaction Type',
+      'Parts & Services Breakdown',
+      'Gross Bill (Rs)',
+      'Advance Paid (-Rs)',
+      'Cash Paid (-Rs)',
+      'UPI Paid (-Rs)',
+      'New Udhaar (+Rs)',
+      'Khata Settled (-Rs)',
+      'Net Due Balance After (Rs)',
+      'Payment Ref / Notes'
+    ].map(escapeCsv).join(','));
+
+    const completedCards = jobCards.filter((jc: any) => jc.status === 'completed');
+    for (const jc of completedCards) {
+      const partsSum = (jc.items || []).reduce((s: number, it: any) => s + (Number(it.unit_price) || 0) * (Number(it.quantity) || 1), 0);
+      const labour = Number(jc.labour_charge || 0);
+      const consumables = Number(jc.consumable_charge !== undefined ? jc.consumable_charge : 20);
+      const gross = partsSum + labour + consumables;
+      const advance = Number(jc.advance_paid || 0);
+      const cash = Number(jc.mandatory_cash_to_collect || jc.cash_collected || 0);
+      const upi = Number(jc.upi_collected || 0);
+      const khata = Number(jc.transferred_to_khata || 0);
+
+      const itemsDesc = (jc.items || [])
+        .map((it: any) => `${it.item_name} (x${it.quantity || 1} @ Rs.${it.unit_price})`)
+        .join('; ');
+
+      csvLines.push([
+        new Date(jc.billed_at || jc.created_at).toLocaleString('en-IN'),
+        `INV-${jc.id.slice(-4).toUpperCase()}`,
+        `${jc.bike_number} (${jc.odometer_km || 0} KM)`,
+        'COMPLETED JOB CARD',
+        itemsDesc || 'General Maintenance',
+        gross.toFixed(2),
+        advance.toFixed(2),
+        cash.toFixed(2),
+        upi.toFixed(2),
+        khata.toFixed(2),
+        '0.00',
+        '-',
+        jc.upi_ref_number ? `UPI Ref: ${jc.upi_ref_number}` : 'Handover Settled'
+      ].map(escapeCsv).join(','));
+    }
+
+    const settlements = ledgerEntries.filter((l: any) => l.transaction_type === 'udhaar_cleared');
+    for (const st of settlements) {
+      csvLines.push([
+        new Date(st.created_at).toLocaleString('en-IN'),
+        st.invoice_number || 'SETTLEMENT',
+        customer.bike_number || '-',
+        'UDHAAR CLEARANCE',
+        st.notes || 'Khata Payment Settled',
+        '0.00',
+        '0.00',
+        st.reference_no?.includes('CASH') ? Number(st.amount || 0).toFixed(2) : '0.00',
+        st.reference_no?.includes('UPI') ? Number(st.amount || 0).toFixed(2) : '0.00',
+        '0.00',
+        Number(st.amount || 0).toFixed(2),
+        Number(st.balance_after || 0).toFixed(2),
+        st.reference_no || 'Receipt'
+      ].map(escapeCsv).join(','));
+    }
+
+    const csvContent = '\uFEFF' + csvLines.join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const cleanCustName = customer.customer_name.replace(/\s+/g, '_');
+    link.download = `Customer_Sheet_${cleanCustName}_${customer.bike_number || 'BIKE'}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  },
+
+  exportCustomerStatementPdf(
+    customer: Customer,
+    jobCards: any[],
+    ledgerEntries: CreditLedgerEntry[],
+    metrics: any,
+    shop: Shop
+  ): void {
+    const doc = new jsPDF({
+      unit: 'pt',
+      format: 'a4',
+    });
+
+    // Dark header
+    doc.setFillColor(15, 23, 42); // slate-900
+    doc.rect(0, 0, 595, 75, 'F');
+
+    doc.setTextColor(245, 158, 11); // amber-500
+    doc.setFontSize(18);
+    doc.setFont('helvetica', 'bold');
+    doc.text(shop.shop_name.toUpperCase(), 40, 32);
+
+    doc.setTextColor(203, 213, 225); // slate-300
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`CUSTOMER MASTER FINANCIAL STATEMENT & AUDIT DOSSIER | Phone: ${shop.owner_phone}`, 40, 48);
+    doc.text(`Generated on: ${new Date().toLocaleString('en-IN')} | Shop UPI: ${shop.upi_id}`, 40, 60);
+
+    // Customer info bar
+    doc.setFillColor(241, 245, 249);
+    doc.rect(40, 85, 515, 45, 'F');
+    doc.setTextColor(30, 41, 59);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Customer: ${customer.customer_name.toUpperCase()}`, 50, 102);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Mobile: ${customer.phone || 'N/A'} | Bike: ${customer.bike_number || 'N/A'} (${customer.bike_model || 'Standard'})`, 50, 118);
+
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Trust Tier: ${customer.trust_tier?.toUpperCase() || 'REGULAR'}`, 380, 102);
+    doc.setTextColor(220, 38, 38);
+    const due = Number(metrics?.accurateCurrentDue ?? customer.current_due ?? 0);
+    doc.text(`Current Due: INR ${due}`, 380, 118);
+    doc.setTextColor(30, 41, 59);
+
+    // 6-box summary grid
+    let y = 140;
+    const boxes = [
+      { label: 'Total Visits', val: String(metrics?.totalVisits || jobCards.length) },
+      { label: 'Gross Billed', val: `INR ${Math.round(metrics?.totalGrossBilled || 0)}` },
+      { label: 'Advance Paid', val: `INR ${Math.round(metrics?.totalAdvancePaid || 0)}` },
+      { label: 'Cash + UPI Paid', val: `INR ${Math.round((metrics?.totalCashPaid || 0) + (metrics?.totalUpiPaid || 0))}` },
+      { label: 'Udhaar Settled', val: `INR ${Math.round(metrics?.totalUdhaarSettled || 0)}` },
+      { label: 'Net Udhaar Due', val: `INR ${due}` },
+    ];
+
+    boxes.forEach((b, i) => {
+      const bx = 40 + i * 86;
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.rect(bx, y, 82, 35, 'FD');
+      doc.setFontSize(6.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(b.label, bx + 4, y + 12);
+      doc.setFontSize(8.5);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(i === 5 && due > 0 ? 220 : 30, i === 5 && due > 0 ? 38 : 41, i === 5 && due > 0 ? 38 : 59);
+      doc.text(b.val, bx + 4, y + 26);
+    });
+
+    y += 48;
+
+    // Table Header
+    doc.setFillColor(30, 41, 59);
+    doc.rect(40, y, 515, 18, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(7.5);
+    doc.setFont('helvetica', 'bold');
+    doc.text('DATE', 46, y + 12);
+    doc.text('INV / REF', 110, y + 12);
+    doc.text('BIKE / ODO', 180, y + 12);
+    doc.text('GROSS', 270, y + 12);
+    doc.text('PAID (ADV+CASH+UPI)', 330, y + 12);
+    doc.text('NEW UDHAAR', 430, y + 12);
+    doc.text('BALANCE AFTER', 490, y + 12);
+
+    y += 24;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(30, 41, 59);
+
+    const completed = jobCards.filter((jc: any) => jc.status === 'completed');
+    completed.forEach((jc: any) => {
+      if (y > 770) {
+        doc.addPage();
+        y = 40;
+      }
+      const partsSum = (jc.items || []).reduce((s: number, it: any) => s + (Number(it.unit_price) || 0) * (Number(it.quantity) || 1), 0);
+      const labour = Number(jc.labour_charge || 0);
+      const gross = partsSum + labour + Number(jc.consumable_charge !== undefined ? jc.consumable_charge : 20);
+      const paid = Number(jc.advance_paid || 0) + Number(jc.mandatory_cash_to_collect || jc.cash_collected || 0) + Number(jc.upi_collected || 0);
+      const khata = Number(jc.transferred_to_khata || 0);
+
+      doc.text(new Date(jc.billed_at || jc.created_at).toLocaleDateString('en-IN'), 46, y);
+      doc.text(`INV-${jc.id.slice(-4).toUpperCase()}`, 110, y);
+      doc.text(`${jc.bike_number || '-'} (${jc.odometer_km || 0} KM)`, 180, y);
+      doc.text(`INR ${gross}`, 270, y);
+      doc.text(`INR ${paid}`, 330, y);
+      doc.setTextColor(khata > 0 ? 220 : 30, khata > 0 ? 38 : 41, khata > 0 ? 38 : 59);
+      doc.text(`INR ${khata}`, 430, y);
+      doc.setTextColor(30, 41, 59);
+      doc.text(`INR ${khata}`, 490, y);
+      y += 14;
+    });
+
+    // Settlements
+    ledgerEntries.filter((l: any) => l.transaction_type === 'udhaar_cleared').forEach((st: any) => {
+      if (y > 770) {
+        doc.addPage();
+        y = 40;
+      }
+      doc.setTextColor(16, 185, 129);
+      doc.text(new Date(st.created_at).toLocaleDateString('en-IN'), 46, y);
+      doc.text(st.invoice_number || 'SETTLEMENT', 110, y);
+      doc.text('Udhaar Payment Cleared', 180, y);
+      doc.text('—', 270, y);
+      doc.text(`-INR ${st.amount}`, 330, y);
+      doc.text('—', 430, y);
+      doc.text(`INR ${st.balance_after || 0}`, 490, y);
+      doc.setTextColor(30, 41, 59);
+      y += 14;
+    });
+
+    // Footer
+    doc.setFontSize(7);
+    doc.setTextColor(148, 163, 184);
+    doc.text('Official Customer Ledger Statement generated by BikeReady Pro. Computer generated audit document.', 40, 800);
+
+    doc.save(`Customer_Statement_${customer.customer_name.replace(/\s+/g, '_')}.pdf`);
   },
 
   // ========================

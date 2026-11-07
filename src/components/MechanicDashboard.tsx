@@ -99,10 +99,6 @@ export const MechanicDashboard: React.FC<MechanicDashboardProps> = ({
   const [searchingHistory, setSearchingHistory] = useState(false);
   const [creatingCard, setCreatingCard] = useState(false);
 
-  // In-Place Item Price Editing
-  const [editingItemPriceId, setEditingItemPriceId] = useState<string | null>(null);
-  const [editingItemPriceVal, setEditingItemPriceVal] = useState<number>(0);
-
   // Edit Complaints / Notes Modal
   const [showEditComplaintsModal, setShowEditComplaintsModal] = useState(false);
   const [editCardComplaints, setEditCardComplaints] = useState('');
@@ -116,9 +112,8 @@ export const MechanicDashboard: React.FC<MechanicDashboardProps> = ({
   const [invTotal, setInvTotal] = useState(0);
   const [loadingInv, setLoadingInv] = useState(false);
 
-  // Manual Item
+  // Manual Item (No price editing on Mechanic Desk)
   const [manualName, setManualName] = useState('');
-  const [manualPrice, setManualPrice] = useState<number | ''>('');
   const [manualQty, setManualQty] = useState<number>(1);
   const [showManualForm, setShowManualForm] = useState(false);
 
@@ -357,14 +352,6 @@ export const MechanicDashboard: React.FC<MechanicDashboardProps> = ({
   };
 
   // Unit Price Editing for items on this card
-  const handleUpdateItemUnitPrice = async (itemId: string, newPrice: number) => {
-    if (!selectedCard) return;
-    await supabaseService.updateJobCardItemPrice(itemId, newPrice, selectedCard.id);
-    setEditingItemPriceId(null);
-    await loadJobCards();
-    const fresh = await supabaseService.getJobCardById(selectedCard.id);
-    if (fresh) setSelectedCard(fresh);
-  };
 
   // Delete item from job card
   const handleDeleteCardItem = async (itemId: string, itemName: string) => {
@@ -451,28 +438,20 @@ export const MechanicDashboard: React.FC<MechanicDashboardProps> = ({
     e.preventDefault();
     if (!selectedCard || !manualName.trim()) return;
 
-    const isRestrictedWorker = !isTempMgr && currentUser.role === 'mechanic';
-    const effectivePrice = isRestrictedWorker ? 0 : Number(manualPrice) || 0;
-
     await supabaseService.addPartToJobCard(currentShop.id, selectedCard.id, {
       itemName: manualName.trim(),
-      unitPrice: effectivePrice,
+      unitPrice: 0,
       isUnlisted: true,
-      pricePendingInspection: isRestrictedWorker,
+      pricePendingInspection: true,
       addedByName: currentUser.full_name,
       quantity: manualQty || 1,
     });
 
     setManualName('');
-    setManualPrice('');
     setManualQty(1);
     setShowManualForm(false);
     await loadJobCards();
-    notify.success(
-      isRestrictedWorker
-        ? `Added "${manualName.trim()}". Price will be inspected & set by Manager.`
-        : `Added "${manualName.trim()}" to card.`
-    );
+    notify.success(`Added "${manualName.trim()}". Rate will be inspected & set by Owner/Manager.`);
   };
 
   // Submit & Send for Inspection
@@ -1389,51 +1368,16 @@ export const MechanicDashboard: React.FC<MechanicDashboardProps> = ({
                             )}
                           </div>
 
-                          {editingItemPriceId === it.id ? (
-                            <div className="flex items-center gap-1.5 mt-1">
-                              <span className="text-[11px] text-slate-400">Unit ₹:</span>
-                              <input
-                                type="number"
-                                min="0"
-                                autoFocus
-                                value={editingItemPriceVal}
-                                onChange={(e) => setEditingItemPriceVal(Number(e.target.value) || 0)}
-                                className="w-20 px-2 py-0.5 bg-slate-900 border border-amber-500 rounded text-xs font-mono font-bold text-amber-300"
-                              />
-                              <button
-                                onClick={() => handleUpdateItemUnitPrice(it.id, editingItemPriceVal)}
-                                className="p-1 rounded bg-amber-500 text-slate-950 font-bold"
-                                title="Save Price"
-                              >
-                                <Check className="w-3 h-3" />
-                              </button>
-                              <button
-                                onClick={() => setEditingItemPriceId(null)}
-                                className="p-1 rounded bg-slate-800 text-slate-400 hover:text-slate-200"
-                                title="Cancel"
-                              >
-                                <X className="w-3 h-3" />
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-2 mt-0.5">
-                              <span className="text-[11px] text-slate-400">
-                                Added by: {it.added_by_name} • Unit: ₹{it.unit_price}
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-[11px] text-slate-400">
+                              Added by: {it.added_by_name} • Unit: ₹{it.unit_price}
+                            </span>
+                            {(it.price_pending_inspection || Number(it.unit_price || 0) <= 0) && (
+                              <span className="text-[10px] text-amber-400 font-semibold bg-amber-950/70 border border-amber-800/80 px-1.5 py-0.5 rounded">
+                                ⏳ Rate Set by Owner/Manager
                               </span>
-                              {!selectedCard.is_locked_for_mechanic && (
-                                <button
-                                  onClick={() => {
-                                    setEditingItemPriceId(it.id);
-                                    setEditingItemPriceVal(it.unit_price || 0);
-                                  }}
-                                  className="text-[10px] text-amber-400 hover:text-amber-300 font-semibold flex items-center gap-0.5 underline"
-                                  title="Edit Item Unit Price"
-                                >
-                                  <Edit2 className="w-2.5 h-2.5" /> Edit Rate
-                                </button>
-                              )}
-                            </div>
-                          )}
+                            )}
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-3">
@@ -1600,39 +1544,14 @@ export const MechanicDashboard: React.FC<MechanicDashboardProps> = ({
                         />
                       </div>
 
-                      {!isTempMgr && currentUser.role === 'mechanic' ? (
-                        <div className="flex-1 flex items-end">
-                          <button
-                            type="submit"
-                            className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs transition"
-                          >
-                            + Add Part to Job
-                          </button>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="flex-1">
-                            <label className="block text-[10px] text-slate-400 mb-0.5">Unit Price (₹):</label>
-                            <input
-                              type="number"
-                              placeholder="Price ₹"
-                              value={manualPrice}
-                              onChange={(e) =>
-                                setManualPrice(e.target.value === '' ? '' : Number(e.target.value))
-                              }
-                              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-100 focus:outline-none focus:border-amber-500 font-mono"
-                            />
-                          </div>
-                          <div className="flex items-end">
-                            <button
-                              type="submit"
-                              className="px-4 py-2 bg-amber-500 text-slate-950 font-bold rounded-lg text-xs hover:bg-amber-400 transition shrink-0"
-                            >
-                              Add
-                            </button>
-                          </div>
-                        </>
-                      )}
+                      <div className="flex-1 flex items-end">
+                        <button
+                          type="submit"
+                          className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs transition shadow"
+                        >
+                          + Add Part to Job (Rate Set by Manager)
+                        </button>
+                      </div>
                     </div>
                   </form>
                 )}

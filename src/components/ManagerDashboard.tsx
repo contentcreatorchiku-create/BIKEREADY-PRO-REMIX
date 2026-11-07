@@ -233,6 +233,9 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   // Copied message state
   const [copiedBillId, setCopiedBillId] = useState<string | null>(null);
 
+  // Billing Finalization Lock (Task 5)
+  const [isFinalizingBill, setIsFinalizingBill] = useState(false);
+
   // Approval Request States
   const [requestingCredit, setRequestingCredit] = useState(false);
   const [requestingDiscount, setRequestingDiscount] = useState(false);
@@ -911,9 +914,9 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
   };
 
-  // Finalize & Bill Action
+  // Finalize & Bill Action (with lock to prevent double billing)
   const handleFinalizeAndBill = async () => {
-    if (!selectedCard) return;
+    if (!selectedCard || isFinalizingBill) return;
 
     const canBill = isOwner || (!!todayAttendance && !todayAttendance.punch_out_time);
     if (!canBill) {
@@ -969,89 +972,98 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       }
     }
 
-    let finalPaymentMode = paymentChoice === 'split_credit' ? 'credit' : paymentChoice === 'split_cash_upi' ? 'cash' : paymentChoice;
-    if (numKhata > 0 && (numCash > 0 || numUpi > 0)) {
-      finalPaymentMode = 'split_credit';
-    } else if (numKhata === numNetPayable && numNetPayable > 0) {
-      finalPaymentMode = 'credit';
-    } else if (numUpi > 0 && numCash > 0) {
-      finalPaymentMode = 'split_cash_upi';
-    } else if (numUpi > 0 && numCash === 0) {
-      finalPaymentMode = 'upi';
-    }
-
-    const finalCashToCollect = numCash;
-    const finalKhataAmount = numKhata;
-    const finalUpiToCollect = numUpi;
-
-    // Save billing data first
-    await supabaseService.updateJobCardBilling(selectedCard.id, {
-      labourCharge,
-      consumableCharge,
-      outsideWorkDesc: outsideDesc,
-      outsideWorkShopCost: outsideShopCost,
-      outsideWorkCustomerPrice: outsideCustPrice,
-      extraDiscount,
-      mandatoryCashToCollect: finalCashToCollect,
-      transferredToKhata: finalKhataAmount,
-      totalBill: numGrossBill,
-      cashCollected: finalCashToCollect,
-      upiCollected: finalUpiToCollect,
-    });
-
-    // Schedule check-up follow-up if selected
-    if (followupDaysOption !== 'none') {
-      let targetDate = '';
-      const now = new Date();
-      if (followupDaysOption === '3_days') {
-        now.setDate(now.getDate() + 3);
-        targetDate = now.toISOString().split('T')[0];
-      } else if (followupDaysOption === '7_days') {
-        now.setDate(now.getDate() + 7);
-        targetDate = now.toISOString().split('T')[0];
-      } else if (followupDaysOption === '15_days') {
-        now.setDate(now.getDate() + 15);
-        targetDate = now.toISOString().split('T')[0];
-      } else if (followupDaysOption === 'custom' && customFollowupDate) {
-        targetDate = customFollowupDate;
+    setIsFinalizingBill(true);
+    try {
+      let finalPaymentMode = paymentChoice === 'split_credit' ? 'credit' : paymentChoice === 'split_cash_upi' ? 'cash' : paymentChoice;
+      if (numKhata > 0 && (numCash > 0 || numUpi > 0)) {
+        finalPaymentMode = 'split_credit';
+      } else if (numKhata === numNetPayable && numNetPayable > 0) {
+        finalPaymentMode = 'credit';
+      } else if (numUpi > 0 && numCash > 0) {
+        finalPaymentMode = 'split_cash_upi';
+      } else if (numUpi > 0 && numCash === 0) {
+        finalPaymentMode = 'upi';
       }
 
-      if (targetDate) {
-        const fullNote = [selectedComplaints.join(', '), followupNote].filter(Boolean).join(' | ') || 'Service Check-up Re-inspection';
-        await supabaseService.scheduleJobCardFollowup(selectedCard.id, targetDate, fullNote);
+      const finalCashToCollect = numCash;
+      const finalKhataAmount = numKhata;
+      const finalUpiToCollect = numUpi;
+
+      // Save billing data first
+      await supabaseService.updateJobCardBilling(selectedCard.id, {
+        labourCharge,
+        consumableCharge,
+        outsideWorkDesc: outsideDesc,
+        outsideWorkShopCost: outsideShopCost,
+        outsideWorkCustomerPrice: outsideCustPrice,
+        extraDiscount,
+        mandatoryCashToCollect: finalCashToCollect,
+        transferredToKhata: finalKhataAmount,
+        totalBill: numGrossBill,
+        cashCollected: finalCashToCollect,
+        upiCollected: finalUpiToCollect,
+      });
+
+      // Schedule check-up follow-up if selected
+      if (followupDaysOption !== 'none') {
+        let targetDate = '';
+        const now = new Date();
+        if (followupDaysOption === '3_days') {
+          now.setDate(now.getDate() + 3);
+          targetDate = now.toISOString().split('T')[0];
+        } else if (followupDaysOption === '7_days') {
+          now.setDate(now.getDate() + 7);
+          targetDate = now.toISOString().split('T')[0];
+        } else if (followupDaysOption === '15_days') {
+          now.setDate(now.getDate() + 15);
+          targetDate = now.toISOString().split('T')[0];
+        } else if (followupDaysOption === 'custom' && customFollowupDate) {
+          targetDate = customFollowupDate;
+        }
+
+        if (targetDate) {
+          const fullNote = [selectedComplaints.join(', '), followupNote].filter(Boolean).join(' | ') || 'Service Check-up Re-inspection';
+          await supabaseService.scheduleJobCardFollowup(selectedCard.id, targetDate, fullNote);
+        }
       }
-    }
 
-    // Finalize card, deduct stock & sync Khata
-    const ok = await supabaseService.completeAndBillJobCard(
-      selectedCard.id,
-      finalPaymentMode,
-      finalCashToCollect,
-      finalKhataAmount,
-      upiRefNumber.trim(),
-      finalUpiToCollect
-    );
+      // Finalize card, deduct stock & sync Khata
+      const ok = await supabaseService.completeAndBillJobCard(
+        selectedCard.id,
+        finalPaymentMode,
+        finalCashToCollect,
+        finalKhataAmount,
+        upiRefNumber.trim(),
+        finalUpiToCollect
+      );
 
-    if (ok) {
-      notify.success(`Invoice issued for ${selectedCard.bike_number}!`);
-      const updatedCard: JobCard = {
-        ...selectedCard,
-        status: 'completed',
-        total_bill: numGrossBill,
-        mandatory_cash_to_collect: finalCashToCollect,
-        cash_collected: finalCashToCollect,
-        transferred_to_khata: finalKhataAmount,
-        upi_collected: finalUpiToCollect,
-        upi_ref_number: upiRefNumber.trim(),
-        payment_mode: finalPaymentMode,
-        billed_at: new Date().toISOString(),
-      };
-      // Immediately reflect COMPLETED status in local UI without requiring a reload
-      setJobCards((prev) => prev.map((c) => (c.id === selectedCard.id ? updatedCard : c)));
-      syncSelectedCard(updatedCard);
-      await loadJobCards();
-      onRefreshData();
-      onOpenInvoiceModal(updatedCard);
+      if (ok) {
+        notify.success(`Invoice issued for ${selectedCard.bike_number}!`);
+        const updatedCard: JobCard = {
+          ...selectedCard,
+          status: 'completed',
+          total_bill: numGrossBill,
+          mandatory_cash_to_collect: finalCashToCollect,
+          cash_collected: finalCashToCollect,
+          transferred_to_khata: finalKhataAmount,
+          upi_collected: finalUpiToCollect,
+          upi_ref_number: upiRefNumber.trim(),
+          payment_mode: finalPaymentMode,
+          billed_at: new Date().toISOString(),
+        };
+
+        // Immediately reflect COMPLETED status in local UI without requiring a reload
+        setJobCards((prev) => prev.map((c) => (c.id === selectedCard.id ? updatedCard : c)));
+        setSelectedCard(null);
+
+        // Open official Invoice & Gate Pass PDF modal 100% of the time
+        onOpenInvoiceModal(updatedCard);
+
+        await loadJobCards();
+        onRefreshData();
+      }
+    } finally {
+      setIsFinalizingBill(false);
     }
   };
 
@@ -2879,12 +2891,14 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                 return (
                   <button
                     type="button"
-                    disabled={isDiscountLocked || isPartialPaymentShort || isTotalNotMet}
+                    disabled={isFinalizingBill || isDiscountLocked || isPartialPaymentShort || isTotalNotMet}
                     onClick={handleFinalizeAndBill}
                     className="w-full py-3.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-xl text-sm shadow-lg shadow-amber-500/20 transition flex items-center justify-center gap-2 disabled:opacity-40"
                   >
-                    <CheckCircle2 className="w-4 h-4" />
-                    {isDiscountLocked
+                    <CheckCircle2 className={`w-4 h-4 ${isFinalizingBill ? 'animate-spin' : ''}`} />
+                    {isFinalizingBill
+                      ? 'Finalizing Bill & Generating Invoice...'
+                      : isDiscountLocked
                       ? 'Discount Approval Required'
                       : isPartialPaymentShort
                       ? `⚠️ Vehicle Retained — Remaining ₹${remainingMandatory} Must Be Paid`

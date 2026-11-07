@@ -27,22 +27,29 @@ import {
   MapPin,
   ArrowUpDown,
   Megaphone,
+  Download,
+  FileSpreadsheet,
+  Printer,
 } from 'lucide-react';
+import { InvoicePdfModal } from './InvoicePdfModal';
 
 interface CustomersKhataViewProps {
   currentShop: Shop;
   currentUser: User;
   onRefreshData: () => void;
+  onOpenInvoiceModal?: (card: JobCard) => void;
 }
 
 export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
   currentShop,
   currentUser,
   onRefreshData,
+  onOpenInvoiceModal,
 }) => {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [followupJobCards, setFollowupJobCards] = useState<JobCard[]>([]);
   const [search, setSearch] = useState('');
+  const [viewInvoiceCard, setViewInvoiceCard] = useState<JobCard | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Quick Filter & Sort State
@@ -88,6 +95,16 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
     customer: Customer | null;
     jobCards: any[];
     ledgerEntries: CreditLedgerEntry[];
+    metrics?: {
+      totalVisits: number;
+      totalGrossBilled: number;
+      totalAdvancePaid: number;
+      totalCashPaid: number;
+      totalUpiPaid: number;
+      totalUdhaarIncurred: number;
+      totalUdhaarSettled: number;
+      accurateCurrentDue: number;
+    };
   } | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
@@ -472,8 +489,9 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                   <button
                     onClick={() => handleOpenHistory(c)}
                     className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1 transition"
+                    title="View Customer Master Data Sheet & 360° History"
                   >
-                    <FileText className="w-3.5 h-3.5 text-amber-400" /> 360° History
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-amber-400" /> 📊 Customer Data Sheet
                   </button>
 
                   {hasDue ? (
@@ -966,54 +984,231 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
         </div>
       )}
 
-      {/* CUSTOMER 360° HISTORY MODAL */}
+      {/* CUSTOMER 360° HISTORY & MASTER DATA SHEET MODAL */}
       {historyCustomer && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-6 max-w-5xl w-full max-h-[92vh] overflow-y-auto shadow-2xl space-y-4">
+            {/* Modal Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-800 pb-4">
               <div>
-                <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
-                  <History className="w-5 h-5 text-amber-400" />
-                  <span>360° Vehicle &amp; Service History</span>
-                </h3>
-                <p className="text-xs text-slate-400">
-                  {historyCustomer.customer_name} • {historyCustomer.phone || 'No Phone'} • Bike: <strong className="text-amber-300 font-mono">{historyCustomer.bike_number || 'N/A'}</strong>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2">
+                    <FileSpreadsheet className="w-5 h-5 text-amber-400" />
+                    <span>Customer Master Data Sheet &amp; 360° Audit Dossier</span>
+                  </h3>
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30 capitalize">
+                    {historyCustomer.trust_tier} Trust
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  <strong className="text-slate-200">{historyCustomer.customer_name}</strong> • Phone: <span className="font-mono text-slate-300">{historyCustomer.phone || 'N/A'}</span>
+                  {historyCustomer.alt_phone && <span> / <span className="font-mono text-slate-300">{historyCustomer.alt_phone}</span></span>} • Bike: <strong className="text-amber-300 font-mono">{historyCustomer.bike_number || 'N/A'}</strong>
+                  {historyCustomer.bike_model && <span> ({historyCustomer.bike_model})</span>}
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  setHistoryCustomer(null);
-                  setHistoryData(null);
-                }}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800"
-              >
-                <X className="w-5 h-5" />
-              </button>
+
+              {/* Action & Export Buttons */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    supabaseService.exportCustomerStatementPdf(
+                      historyCustomer,
+                      historyData?.jobCards || [],
+                      historyData?.ledgerEntries || [],
+                      historyData?.metrics,
+                      currentShop
+                    );
+                    notify.success('Downloading Official Customer Statement PDF...');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition shadow-sm"
+                  title="Download clean official PDF statement"
+                >
+                  <Printer className="w-3.5 h-3.5 text-amber-400" />
+                  <span>📄 Download Statement PDF</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    supabaseService.exportCustomerSheetCsv(
+                      historyCustomer,
+                      historyData?.jobCards || [],
+                      historyData?.ledgerEntries || [],
+                      historyData?.metrics,
+                      currentShop.shop_name
+                    );
+                    notify.success('Exported Customer Sheet (.CSV) successfully!');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-950/80 hover:bg-emerald-900/80 text-emerald-200 border border-emerald-800 text-xs font-semibold flex items-center gap-1.5 transition shadow-sm"
+                  title="Export full raw data sheet to Excel (.csv)"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>📊 Export Sheet (.CSV)</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setHistoryCustomer(null);
+                    setHistoryData(null);
+                    loadCustomers();
+                  }}
+                  className="p-1.5 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-800 ml-1 transition"
+                  title="Close"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            {/* Account Summary Banner */}
-            <div className="grid grid-cols-3 gap-2 p-3 bg-slate-950 rounded-2xl border border-slate-800 text-xs">
-              <div className="text-center">
-                <span className="text-[10px] text-slate-500 uppercase block">Trust Tier</span>
-                <span className="font-bold text-amber-400 capitalize">{historyCustomer.trust_tier}</span>
+            {/* 6-BOX UNIFIED FINANCIAL SUMMARY BAR */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 p-3 bg-slate-950/90 rounded-2xl border border-slate-800 text-xs shadow-inner">
+              <div className="p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Total Visits / Bills</span>
+                <span className="text-sm font-mono font-extrabold text-amber-400">
+                  {historyData?.metrics?.totalVisits ?? (historyData?.jobCards?.filter((j: any) => j.status === 'completed').length || 0)}
+                </span>
               </div>
-              <div className="text-center">
-                <span className="text-[10px] text-slate-500 uppercase block">Credit Limit</span>
-                <span className="font-mono font-bold text-slate-200">₹{historyCustomer.credit_limit}</span>
+              <div className="p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Total Gross Billed</span>
+                <span className="text-sm font-mono font-extrabold text-slate-100">
+                  ₹{historyData?.metrics?.totalGrossBilled ?? 0}
+                </span>
               </div>
-              <div className="text-center">
-                <span className="text-[10px] text-slate-500 uppercase block">Current Due</span>
+              <div className="p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Total Advance Paid</span>
+                <span className="text-sm font-mono font-extrabold text-blue-400">
+                  ₹{historyData?.metrics?.totalAdvancePaid ?? 0}
+                </span>
+              </div>
+              <div className="p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Cash + UPI Paid</span>
+                <span className="text-sm font-mono font-extrabold text-emerald-400">
+                  ₹{((historyData?.metrics?.totalCashPaid ?? 0) + (historyData?.metrics?.totalUpiPaid ?? 0))}
+                </span>
+              </div>
+              <div className="p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Total Udhaar Settled</span>
+                <span className="text-sm font-mono font-extrabold text-emerald-300">
+                  ₹{historyData?.metrics?.totalUdhaarSettled ?? 0}
+                </span>
+              </div>
+              <div className="p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Net Udhaar Due</span>
                 {(() => {
-                  const verifiedDue = historyData?.customer?.current_due !== undefined
-                    ? Number(historyData.customer.current_due)
-                    : Number(historyCustomer.current_due || 0);
+                  const verifiedDue = historyData?.metrics?.accurateCurrentDue ?? (
+                    historyData?.customer?.current_due !== undefined
+                      ? Number(historyData.customer.current_due)
+                      : Number(historyCustomer.current_due || 0)
+                  );
                   return (
-                    <span className={`font-mono font-bold ${verifiedDue > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    <span className={`text-sm font-mono font-extrabold ${verifiedDue > 0 ? 'text-rose-400 animate-pulse' : 'text-emerald-400'}`}>
                       ₹{verifiedDue}
                     </span>
                   );
                 })()}
               </div>
+            </div>
+
+            {/* 📋 COMPLETE CUSTOMER MASTER DATA SHEET */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <FileSpreadsheet className="w-4 h-4 text-amber-400" />
+                  <span>📋 Complete Customer Master Data Sheet (Bill-by-Bill Breakdown)</span>
+                </h4>
+                <span className="text-[10px] text-slate-400 font-mono">
+                  {(historyData?.jobCards?.filter((j: any) => j.status === 'completed').length || 0)} Completed Bills
+                </span>
+              </div>
+
+              {loadingHistory ? (
+                <div className="py-6 text-center text-xs text-slate-400 bg-slate-950 rounded-2xl border border-slate-800">
+                  Loading customer master data sheet...
+                </div>
+              ) : !historyData?.jobCards || historyData.jobCards.filter((j: any) => j.status === 'completed').length === 0 ? (
+                <div className="py-6 text-center text-xs text-slate-500 bg-slate-950/60 rounded-2xl border border-slate-800">
+                  No finalized bills recorded yet for this customer.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-2xl border border-slate-800 bg-slate-950 shadow-md">
+                  <table className="w-full text-left text-xs whitespace-nowrap">
+                    <thead className="bg-slate-900/90 text-slate-400 text-[10px] uppercase font-semibold border-b border-slate-800">
+                      <tr>
+                        <th className="py-2.5 px-3">Date</th>
+                        <th className="py-2.5 px-3">Invoice / Job #</th>
+                        <th className="py-2.5 px-3">Bike &amp; Odo</th>
+                        <th className="py-2.5 px-3 max-w-[200px]">Parts &amp; Labour Summary</th>
+                        <th className="py-2.5 px-3 text-right">Gross Bill</th>
+                        <th className="py-2.5 px-3 text-right">Advance</th>
+                        <th className="py-2.5 px-3 text-right">Cash Paid</th>
+                        <th className="py-2.5 px-3 text-right">UPI Paid</th>
+                        <th className="py-2.5 px-3 text-right">New Udhaar</th>
+                        <th className="py-2.5 px-3 text-center">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 text-[11px]">
+                      {historyData.jobCards
+                        .filter((jc: any) => jc.status === 'completed')
+                        .map((jc: any) => {
+                          const partsSummary = (jc.items && jc.items.length > 0)
+                            ? jc.items.map((it: any) => `${it.item_name} ×${it.quantity || 1}`).join(', ')
+                            : 'Standard Service';
+                          const invNum = jc.invoice_number || (jc.id ? `INV-${jc.id.slice(0, 6).toUpperCase()}` : 'INV-BILL');
+                          return (
+                            <tr key={jc.id} className="hover:bg-slate-900/50 transition">
+                              <td className="py-2.5 px-3 font-mono text-[10px] text-slate-300">
+                                {new Date(jc.billed_at || jc.created_at).toLocaleDateString()}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-[10px] font-bold text-amber-300">
+                                {invNum}
+                              </td>
+                              <td className="py-2.5 px-3 text-[10px] font-mono text-slate-300">
+                                {jc.bike_number || historyCustomer.bike_number}
+                                <span className="text-slate-500 ml-1">({jc.odometer_km || 0} km)</span>
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-300 max-w-[220px] truncate" title={`${partsSummary} | Labour: ₹${jc.labour_charge || 0}`}>
+                                {partsSummary} <span className="text-slate-500">(Lab: ₹{jc.labour_charge || 0})</span>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-100">
+                                ₹{jc.total_bill || 0}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono text-blue-400">
+                                {jc.advance_paid > 0 ? `₹${jc.advance_paid}` : '-'}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono text-emerald-400">
+                                {jc.cash_collected > 0 ? `₹${jc.cash_collected}` : (jc.mandatory_cash_to_collect > 0 ? `₹${jc.mandatory_cash_to_collect}` : '-')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono text-cyan-400">
+                                {jc.upi_collected > 0 ? `₹${jc.upi_collected}` : '-'}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono font-bold text-rose-400">
+                                {jc.transferred_to_khata > 0 ? `₹${jc.transferred_to_khata}` : '-'}
+                              </td>
+                              <td className="py-2.5 px-3 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (onOpenInvoiceModal) {
+                                      onOpenInvoiceModal(jc);
+                                    } else {
+                                      setViewInvoiceCard(jc);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1 mx-auto transition"
+                                  title="View and download printable PDF invoice"
+                                >
+                                  <FileText className="w-3 h-3 text-amber-400" />
+                                  <span>📄 PDF</span>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             {/* 💰 PAYMENT & SETTLEMENT HISTORY (AUDIT DOSSIER) */}
@@ -1144,10 +1339,27 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                             {jc.status}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400">
+                        <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
                           <span>Odometer: <strong className="text-amber-300">{jc.odometer_km || 0} KM</strong></span>
                           <span>•</span>
                           <span>Mech: {jc.mechanic?.full_name || 'Assigned'}</span>
+                          {jc.status === 'completed' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (onOpenInvoiceModal) {
+                                  onOpenInvoiceModal(jc);
+                                } else {
+                                  setViewInvoiceCard(jc);
+                                }
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1.5 transition ml-2"
+                              title="View and download printable PDF invoice"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-amber-400" />
+                              <span>📄 PDF Invoice</span>
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -1214,15 +1426,24 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                 onClick={() => {
                   setHistoryCustomer(null);
                   setHistoryData(null);
+                  loadCustomers();
                 }}
                 className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition"
               >
-                Close 360° History
+                Close Customer Sheet
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Invoice PDF Modal for Direct Khata View Previews */}
+      <InvoicePdfModal
+        isOpen={!!viewInvoiceCard}
+        jobCard={viewInvoiceCard}
+        shop={currentShop}
+        onClose={() => setViewInvoiceCard(null)}
+      />
 
       {/* 📢 ALL-CUSTOMER BROADCAST & FESTIVAL PROMO ENGINE MODAL */}
       {showBroadcastModal && (

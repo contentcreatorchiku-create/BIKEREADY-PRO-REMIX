@@ -662,6 +662,7 @@ export default function App() {
                 currentShop={currentShop}
                 currentUser={currentUser}
                 onRefreshData={bootApp}
+                onOpenInvoiceModal={(card) => setInvoiceModalCard(card)}
               />
             )}
 
