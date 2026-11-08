@@ -203,13 +203,19 @@ export function generateItemizedWhatsAppBill(
   let discountsStr = '';
   if (discount > 0) discountsStr = `\n- Special Customer Discount: -Rs. ${discount}`;
 
-  const cashPaid = typeof jobCard.cash_collected === 'number'
-    ? Number(jobCard.cash_collected || 0)
-    : Number(jobCard.mandatory_cash_to_collect || 0);
+  let cashPaid = Number(jobCard.cash_collected ?? jobCard.mandatory_cash_to_collect ?? 0);
+  let upiPaid = Number(jobCard.upi_collected ?? 0);
   const udhaarDue = Number(jobCard.transferred_to_khata || 0);
-  const upiPaid = typeof jobCard.upi_collected === 'number'
-    ? Number(jobCard.upi_collected || 0)
-    : Math.max(0, netPayable - cashPaid - udhaarDue);
+
+  const expectedPaidAtDelivery = Math.max(0, netPayable - udhaarDue);
+  if (cashPaid + upiPaid === 0 && expectedPaidAtDelivery > 0) {
+    if (jobCard.payment_mode === 'upi' || jobCard.upi_ref_number) {
+      upiPaid = expectedPaidAtDelivery;
+    } else {
+      cashPaid = expectedPaidAtDelivery;
+    }
+  }
+
   const totalPaidForJob = Math.round((advancePaid + cashPaid + upiPaid + Number.EPSILON) * 100) / 100;
   const utrStr = jobCard.upi_ref_number ? ` (Ref/UTR: ${jobCard.upi_ref_number})` : '';
 
@@ -1188,7 +1194,7 @@ export const supabaseService = {
           .order('customer_name', { ascending: true }),
         supabase
           .from('job_cards')
-          .select('id, shop_id, customer_id, bike_number, status, total_bill, advance_paid, cash_collected, mandatory_cash_to_collect, upi_collected, transferred_to_khata, billed_at, created_at')
+          .select('id, shop_id, customer_id, customer_phone, bike_number, status, total_bill, advance_paid, cash_collected, mandatory_cash_to_collect, upi_collected, transferred_to_khata, billed_at, created_at')
           .eq('shop_id', shopId)
           .eq('status', 'completed'),
         supabase
@@ -1202,15 +1208,25 @@ export const supabaseService = {
       const allLedger: CreditLedgerEntry[] = ledgerRes.data || [];
 
       const clean = (str: string = '') => str.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+      const cleanPhone = (p: string = '') => p.replace(/\D/g, '').slice(-10);
 
       for (const cust of customers) {
         const custCleanBike = clean(cust.bike_number);
+        const custPhone10 = cleanPhone(cust.phone);
+        const custAltPhone10 = cleanPhone(cust.alt_phone || '');
 
-        // Match cards where customer_id matches OR clean bike_number matches
+        // 3-way match: customer_id OR normalized 10-digit phone OR bike_number
         const custCards = completedCards.filter((jc: any) => {
           if (jc.customer_id === cust.id) return true;
+          const jcPhone10 = cleanPhone(jc.customer_phone || '');
+          if (custPhone10 && jcPhone10 && (jcPhone10 === custPhone10 || jcPhone10 === custAltPhone10)) {
+            if (!jc.customer_id) {
+              jc.customer_id = cust.id;
+              supabase.from('job_cards').update({ customer_id: cust.id }).eq('id', jc.id).then(() => {});
+            }
+            return true;
+          }
           if (custCleanBike && clean(jc.bike_number) === custCleanBike) {
-            // Auto-link in background if unlinked
             if (!jc.customer_id) {
               jc.customer_id = cust.id;
               supabase.from('job_cards').update({ customer_id: cust.id }).eq('id', jc.id).then(() => {});
@@ -1222,8 +1238,24 @@ export const supabaseService = {
 
         const totalGrossBilled = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.total_bill) || 0), 0);
         const totalAdvancePaid = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.advance_paid) || 0), 0);
-        const totalCashPaid = custCards.reduce((sum: number, jc: any) => sum + Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0), 0);
-        const totalUpiPaid = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.upi_collected) || 0), 0);
+
+        // Accurate delivery payments
+        let totalDeliveryCash = 0;
+        let totalDeliveryUpi = 0;
+        custCards.forEach((jc: any) => {
+          const gross = Number(jc.total_bill || 0);
+          const adv = Number(jc.advance_paid || 0);
+          const net = Math.max(0, gross - adv);
+          const khata = Number(jc.transferred_to_khata || 0);
+          let cash = Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0);
+          let upi = Number(jc.upi_collected || 0);
+          const expectedDeliv = Math.max(0, net - khata);
+          if (cash + upi === 0 && expectedDeliv > 0) {
+            cash = expectedDeliv;
+          }
+          totalDeliveryCash += cash;
+          totalDeliveryUpi += upi;
+        });
 
         const totalUdhaarFromCards = custCards.reduce((sum: number, jc: any) => sum + (Number(jc.transferred_to_khata) || 0), 0);
 
@@ -3037,8 +3069,15 @@ export const supabaseService = {
       startOfDay.setHours(0, 0, 0, 0);
       const startIso = startOfDay.toISOString();
 
-      // 1. Completed Job Cards with Items for Real Net Profit
-      const [completedCardsRes, invItemsRes, quickJobsRes, expensesRes] = await Promise.all([
+      // 1. Fetch completed cards, inventory, quick jobs, expenses, udhaar settlements, and live customer dues
+      const [
+        completedCardsRes,
+        invItemsRes,
+        quickJobsRes,
+        expensesRes,
+        settlementsRes,
+        customersRes,
+      ] = await Promise.all([
         supabase
           .from('job_cards')
           .select('*, items:job_card_items(*)')
@@ -3059,12 +3098,24 @@ export const supabaseService = {
           .select('*')
           .eq('shop_id', shopId)
           .gte('created_at', startIso),
+        supabase
+          .from('credit_ledger')
+          .select('*')
+          .eq('shop_id', shopId)
+          .eq('transaction_type', 'udhaar_cleared')
+          .gte('created_at', startIso),
+        supabase
+          .from('customers')
+          .select('current_due')
+          .eq('shop_id', shopId),
       ]);
 
       const completedCards = completedCardsRes.data || [];
       const invItems = invItemsRes.data || [];
       const quickJobs = quickJobsRes.data || [];
       const expenses = expensesRes.data || [];
+      const settlements = settlementsRes.data || [];
+      const allCustomers = customersRes.data || [];
 
       const costMap = new Map<string, number>();
       invItems.forEach((it) => {
@@ -3073,7 +3124,8 @@ export const supabaseService = {
 
       let jobCardCash = 0;
       let jobCardUpi = 0;
-      let transferredToKhata = 0;
+      let advanceCash = 0;
+      let advanceUpi = 0;
 
       let partsMarginTotal = 0;
       let labourTotal = 0;
@@ -3081,22 +3133,35 @@ export const supabaseService = {
       let outsideMarginTotal = 0;
 
       completedCards.forEach((c) => {
-        const cashAmt = typeof c.cash_collected === 'number'
-          ? Number(c.cash_collected || 0)
-          : Number(c.mandatory_cash_to_collect || 0);
-        const khataAmt = Number(c.transferred_to_khata || 0);
+        const gross = Number(c.total_bill || 0);
         const advAmt = Number(c.advance_paid || 0);
-        const netPay = Math.max(0, Number(c.total_bill || 0) - advAmt);
-        const upiAmt = typeof c.upi_collected === 'number'
-          ? Number(c.upi_collected || 0)
-          : Math.max(0, netPay - cashAmt - khataAmt);
+        const netPay = Math.max(0, gross - advAmt);
+        const khataAmt = Number(c.transferred_to_khata || 0);
 
-        jobCardCash += (cashAmt + advAmt);
+        let cashAmt = Number(c.cash_collected ?? c.mandatory_cash_to_collect ?? 0);
+        let upiAmt = Number(c.upi_collected || 0);
+
+        // If delivery cash + upi is 0 but customer paid (gross exceeds advance + khata)
+        const expectedDeliveryPaid = Math.max(0, netPay - khataAmt);
+        if (cashAmt + upiAmt === 0 && expectedDeliveryPaid > 0) {
+          if (c.payment_mode === 'upi' || c.upi_ref_number) {
+            upiAmt = expectedDeliveryPaid;
+          } else {
+            cashAmt = expectedDeliveryPaid;
+          }
+        }
+
+        // Advance payments
+        if (advAmt > 0) {
+          if (c.payment_mode === 'upi') advanceUpi += advAmt;
+          else advanceCash += advAmt;
+        }
+
+        jobCardCash += cashAmt;
         jobCardUpi += upiAmt;
-        transferredToKhata += khataAmt;
 
         labourTotal += Number(c.labour_charge || 0);
-        consumableTotal += Number(c.consumable_charge || 0);
+        consumableTotal += Number(c.consumable_charge !== undefined ? c.consumable_charge : 20);
         outsideMarginTotal += Math.max(
           0,
           Number(c.outside_work_customer_price || 0) - Number(c.outside_work_shop_cost || 0)
@@ -3112,11 +3177,14 @@ export const supabaseService = {
         });
       });
 
-      // 2. Quick Jobs
+      // 2. Genuine Quick Jobs (exclude udhaar settlements to avoid double counting)
       let quickJobCash = 0;
       let quickJobUpi = 0;
 
       quickJobs.forEach((q) => {
+        if (q.service_name?.toLowerCase().includes('udhaar')) {
+          return;
+        }
         if (q.payment_mode === 'cash') {
           quickJobCash += Number(q.final_price || 0);
         } else {
@@ -3124,7 +3192,28 @@ export const supabaseService = {
         }
       });
 
-      // 3. Expenses, Upad & Scrap Income (Physical Cash Drawer Outflows vs Digital UPI)
+      // 3. Udhaar Settlements Today (Physical Cash vs Digital UPI)
+      let udhaarSettlementCash = 0;
+      let udhaarSettlementUpi = 0;
+
+      settlements.forEach((st: any) => {
+        const amt = Number(st.amount || 0);
+        const notes = st.notes || '';
+        const ref = st.reference_no || '';
+
+        const cashMatch = notes.match(/Cash ₹?([0-9.]+)/i);
+        const upiMatch = notes.match(/UPI ₹?([0-9.]+)/i);
+        if (cashMatch && upiMatch) {
+          udhaarSettlementCash += Number(cashMatch[1] || 0);
+          udhaarSettlementUpi += Number(upiMatch[1] || 0);
+        } else if (ref.includes('UPI') || notes.toLowerCase().includes('via upi') || notes.toLowerCase().includes('upi direct')) {
+          udhaarSettlementUpi += amt;
+        } else {
+          udhaarSettlementCash += amt;
+        }
+      });
+
+      // 4. Expenses, Upad & Scrap Income (Physical Cash Drawer Outflows vs Digital UPI)
       let shopExpenses = 0;
       let staffUpad = 0;
       let scrapIncome = 0;
@@ -3147,13 +3236,20 @@ export const supabaseService = {
         }
       });
 
-      // Physical Cash Inflows: Job Card Cash + Quick Job Cash + Scrap Sale Cash
-      const totalCashIn = jobCardCash + quickJobCash + scrapIncome;
-      // Digital UPI Inflows: Job Card UPI + Quick Job UPI
-      const totalUpiIn = jobCardUpi + quickJobUpi;
+      // Physical Cash Inflows: Job Card Cash + Quick Job Cash + Advance Cash + Udhaar Settlement Cash + Scrap Sale Cash
+      const totalCashIn = jobCardCash + quickJobCash + advanceCash + udhaarSettlementCash + scrapIncome;
+      // Digital UPI Inflows: Job Card UPI + Quick Job UPI + Advance UPI + Udhaar Settlement UPI
+      const totalUpiIn = jobCardUpi + quickJobUpi + advanceUpi + udhaarSettlementUpi;
       // Cash Outflows: Strictly Physical Cash Outflows (Never subtract UPI expenses/salaries from cash drawer!)
       const totalCashOut = cashExpenses;
       const netCashInGalla = totalCashIn - totalCashOut;
+
+      // Live sum of remaining current_due across all customers
+      const transferredToKhata = allCustomers.reduce(
+        (sum, c) => sum + Math.max(0, Number(c.current_due || 0)),
+        0
+      );
+
       const totalRevenue = totalCashIn + totalUpiIn + transferredToKhata;
 
       // Real Net Profit (Asli Munafa):
@@ -3174,6 +3270,10 @@ export const supabaseService = {
         jobCardUpi,
         quickJobCash,
         quickJobUpi,
+        advanceCash,
+        advanceUpi,
+        udhaarSettlementCash,
+        udhaarSettlementUpi,
         totalCashIn,
         totalUpiIn,
         shopExpenses,
@@ -3194,6 +3294,10 @@ export const supabaseService = {
         jobCardUpi: 0,
         quickJobCash: 0,
         quickJobUpi: 0,
+        advanceCash: 0,
+        advanceUpi: 0,
+        udhaarSettlementCash: 0,
+        udhaarSettlementUpi: 0,
         totalCashIn: 0,
         totalUpiIn: 0,
         shopExpenses: 0,
@@ -3233,13 +3337,18 @@ export const supabaseService = {
     }
   },
 
-  // Record customer payment on Udhaar
+  // Record customer payment on Udhaar (Cash, UPI, Split + Galla Sync)
   async recordUdhaarPayment(
     customerId: string,
     amount: number,
-    paymentMode: 'cash' | 'upi',
+    paymentMode: 'cash' | 'upi' | 'split',
     shopId: string,
-    recordedBy: string
+    recordedBy: string,
+    extra?: {
+      cashAmount?: number;
+      upiAmount?: number;
+      utrNumber?: string;
+    }
   ): Promise<boolean> {
     try {
       const { data: cust } = await supabase
@@ -3250,25 +3359,85 @@ export const supabaseService = {
 
       if (!cust) return false;
 
-      const newDue = Math.max(0, (cust.current_due || 0) - amount);
+      const totalSettleAmount = Math.max(0, Number(amount) || 0);
+      let cashAmt = 0;
+      let upiAmt = 0;
+
+      if (paymentMode === 'cash') {
+        cashAmt = totalSettleAmount;
+        upiAmt = 0;
+      } else if (paymentMode === 'upi') {
+        cashAmt = 0;
+        upiAmt = totalSettleAmount;
+      } else {
+        // split
+        cashAmt = Math.max(0, Number(extra?.cashAmount || 0));
+        upiAmt = Math.max(0, Number(extra?.upiAmount || 0));
+        if (cashAmt + upiAmt !== totalSettleAmount) {
+          if (cashAmt > 0 && upiAmt === 0) upiAmt = Math.max(0, totalSettleAmount - cashAmt);
+          else if (upiAmt > 0 && cashAmt === 0) cashAmt = Math.max(0, totalSettleAmount - upiAmt);
+          else {
+            cashAmt = totalSettleAmount;
+            upiAmt = 0;
+          }
+        }
+      }
+
+      const currentDue = Number(cust.current_due || 0);
+      const newDue = Math.max(0, Math.round(((currentDue - totalSettleAmount) + Number.EPSILON) * 100) / 100);
+
+      // 1. Update customer current_due in Supabase
       await supabase
         .from('customers')
         .update({ current_due: newDue })
         .eq('id', customerId);
 
-      // Record quick receipt for galla tally
-      await supabase.from('quick_jobs').insert({
-        shop_id: shopId,
-        worker_id: 'payment-counter',
-        worker_name: recordedBy,
-        service_name: `Udhaar Payment (${cust.customer_name})`,
-        default_price: amount,
-        final_price: amount,
-        is_price_modified: false,
-        payment_mode: paymentMode,
-      });
+      const refNo = extra?.utrNumber
+        ? `UTR: ${extra.utrNumber}`
+        : paymentMode === 'upi'
+        ? 'UPI-RECOVERY'
+        : paymentMode === 'split'
+        ? 'SPLIT-PAYMENT'
+        : 'CASH-COUNTER';
 
-      // Record audit dossier row for Customer 360
+      const notes = paymentMode === 'split'
+        ? `Udhaar cleared via SPLIT: Cash ₹${cashAmt} + UPI ₹${upiAmt}${extra?.utrNumber ? ` (UTR: ${extra.utrNumber})` : ''} - Received by ${recordedBy}`
+        : `Udhaar cleared via ${paymentMode.toUpperCase()}: ₹${totalSettleAmount}${extra?.utrNumber ? ` (UTR: ${extra.utrNumber})` : ''} - Received by ${recordedBy}`;
+
+      const recInvoiceNo = `REC-${Date.now().toString(36).toUpperCase().slice(-5)}`;
+      const nowIso = new Date().toISOString();
+
+      // 2. Insert into Supabase payments / khata_transactions (Defensive dual-write)
+      const settlementRecord = {
+        shop_id: shopId,
+        customer_id: customerId,
+        bike_number: cust.bike_number || 'N/A',
+        type: 'UDHAAR_SETTLEMENT',
+        transaction_type: 'UDHAAR_SETTLEMENT',
+        payment_mode: paymentMode,
+        amount: totalSettleAmount,
+        cash_amount: cashAmt,
+        upi_amount: upiAmt,
+        utr_number: extra?.utrNumber || null,
+        reference_no: refNo,
+        recorded_by: recordedBy,
+        notes: notes,
+        created_at: nowIso,
+      };
+
+      try {
+        await supabase.from('payments').insert(settlementRecord);
+      } catch (pErr) {
+        // Safe if table absent
+      }
+
+      try {
+        await supabase.from('khata_transactions').insert(settlementRecord);
+      } catch (kErr) {
+        // Safe if table absent
+      }
+
+      // 3. Record audit dossier row for Customer 360 & Ledger
       await this.addCreditLedgerEntry({
         shop_id: shopId,
         customer_id: customerId,
@@ -3276,14 +3445,45 @@ export const supabaseService = {
         customer_phone: cust.phone,
         bike_number: cust.bike_number,
         job_card_id: null,
-        invoice_number: `REC-${Date.now().toString(36).toUpperCase().slice(-5)}`,
+        invoice_number: recInvoiceNo,
         transaction_type: 'udhaar_cleared',
-        amount: amount,
+        amount: totalSettleAmount,
         balance_after: newDue,
-        reference_no: paymentMode === 'upi' ? 'UPI-RECOVERY' : 'CASH-COUNTER',
-        notes: `Udhaar payment cleared via ${paymentMode.toUpperCase()} (Received by ${recordedBy})`,
-        created_at: new Date().toISOString(),
+        reference_no: refNo,
+        notes: notes,
+        created_at: nowIso,
       });
+
+      // 4. Record quick receipt for backward compatibility
+      if (cashAmt > 0) {
+        await supabase.from('quick_jobs').insert({
+          shop_id: shopId,
+          worker_id: 'payment-counter',
+          worker_name: recordedBy,
+          service_name: `Udhaar Settlement Cash (${cust.customer_name})`,
+          default_price: cashAmt,
+          final_price: cashAmt,
+          is_price_modified: false,
+          payment_mode: 'cash',
+          created_at: nowIso,
+        }).then(() => {});
+      }
+      if (upiAmt > 0) {
+        await supabase.from('quick_jobs').insert({
+          shop_id: shopId,
+          worker_id: 'payment-counter',
+          worker_name: recordedBy,
+          service_name: `Udhaar Settlement UPI (${cust.customer_name})`,
+          default_price: upiAmt,
+          final_price: upiAmt,
+          is_price_modified: false,
+          payment_mode: 'upi',
+          created_at: nowIso,
+        }).then(() => {});
+      }
+
+      // 5. Reconcile all shop customer balances immediately
+      await this.reconcileShopCustomerBalances(shopId);
 
       return true;
     } catch (err) {
@@ -4363,8 +4563,9 @@ export const supabaseService = {
   }> {
     try {
       const clean = (str: string = '') => str.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+      const cleanPhone = (p: string = '') => p.replace(/\D/g, '').slice(-10);
 
-      const [custRes, allCardsRes, ledgerEntries] = await Promise.all([
+      const [custRes, allCardsRes, ledgerEntries, quickJobsRes] = await Promise.all([
         supabase
           .from('customers')
           .select('*')
@@ -4376,15 +4577,32 @@ export const supabaseService = {
           .eq('shop_id', shopId)
           .order('created_at', { ascending: false }),
         this.getCreditLedger(shopId, customerId),
+        supabase
+          .from('quick_jobs')
+          .select('*')
+          .eq('shop_id', shopId)
+          .order('created_at', { ascending: false }),
       ]);
 
       const customer: Customer | null = custRes.data || null;
       const allCards = allCardsRes.data || [];
-      const custCleanBike = clean(customer?.bike_number);
+      const quickJobs = quickJobsRes.data || [];
 
-      // Match cards where customer_id matches OR bike_number matches
+      const custCleanBike = clean(customer?.bike_number);
+      const custPhone10 = cleanPhone(customer?.phone);
+      const custAltPhone10 = cleanPhone(customer?.alt_phone || '');
+
+      // 3-way fallback match: customer_id OR normalized 10-digit phone OR bike_number
       const jobCards = allCards.filter((jc: any) => {
         if (jc.customer_id === customerId) return true;
+        const jcPhone10 = cleanPhone(jc.customer_phone || jc.customer?.phone || '');
+        if (custPhone10 && jcPhone10 && (jcPhone10 === custPhone10 || jcPhone10 === custAltPhone10)) {
+          if (!jc.customer_id) {
+            jc.customer_id = customerId;
+            supabase.from('job_cards').update({ customer_id: customerId }).eq('id', jc.id).then(() => {});
+          }
+          return true;
+        }
         if (custCleanBike && clean(jc.bike_number) === custCleanBike) {
           if (!jc.customer_id) {
             jc.customer_id = customerId;
@@ -4395,33 +4613,65 @@ export const supabaseService = {
         return false;
       });
 
+      // Match Quick Jobs for this customer
+      const matchingQuickJobs = quickJobs.filter((q: any) => {
+        if (q.service_name?.toLowerCase().includes('udhaar')) return false;
+        const qPhone = cleanPhone((q as any).phone || (q as any).customer_phone || '');
+        if (custPhone10 && qPhone && (qPhone === custPhone10 || qPhone === custAltPhone10)) return true;
+        const qBike = clean((q as any).bike_number || '');
+        if (custCleanBike && qBike && qBike === custCleanBike) return true;
+        if (customer?.customer_name && (q as any).customer_name?.toLowerCase() === customer.customer_name.toLowerCase()) return true;
+        return false;
+      });
+
       // 1. Calculate true accurate single-source-of-truth metrics for this customer
       const completedCards = jobCards.filter((jc: any) => jc.status === 'completed');
-      const totalGrossBilled = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.total_bill) || 0), 0);
+      const cardsGross = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.total_bill) || 0), 0);
+      const quickJobsGross = matchingQuickJobs.reduce((sum: number, q: any) => sum + (Number(q.final_price) || 0), 0);
+      const totalGrossBilled = cardsGross + quickJobsGross;
+
       const totalAdvancePaid = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.advance_paid) || 0), 0);
-      const totalCashPaid = completedCards.reduce((sum: number, jc: any) => sum + Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0), 0);
-      const totalUpiPaid = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.upi_collected) || 0), 0);
 
-      const totalUdhaarFromCards = completedCards.reduce((sum: number, jc: any) => sum + (Number(jc.transferred_to_khata) || 0), 0);
+      let totalCashPaid = 0;
+      let totalUpiPaid = 0;
 
-      const totalUdhaarFromLedger = ledgerEntries
-        .filter((l: any) => l.transaction_type === 'udhaar_incurred' && !l.job_card_id)
-        .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
+      completedCards.forEach((jc: any) => {
+        const gross = Number(jc.total_bill || 0);
+        const adv = Number(jc.advance_paid || 0);
+        const net = Math.max(0, gross - adv);
+        const khata = Number(jc.transferred_to_khata || 0);
 
-      const totalUdhaarIncurred = totalUdhaarFromCards + totalUdhaarFromLedger;
+        let cash = Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0);
+        let upi = Number(jc.upi_collected || 0);
+        const expectedDeliv = Math.max(0, net - khata);
+        if (cash + upi === 0 && expectedDeliv > 0) {
+          if (jc.payment_mode === 'upi' || jc.upi_ref_number) upi = expectedDeliv;
+          else cash = expectedDeliv;
+        }
+        totalCashPaid += cash;
+        totalUpiPaid += upi;
+      });
+
+      matchingQuickJobs.forEach((q: any) => {
+        if (q.payment_mode === 'cash') totalCashPaid += Number(q.final_price || 0);
+        else totalUpiPaid += Number(q.final_price || 0);
+      });
 
       const totalUdhaarSettled = ledgerEntries
         .filter((l: any) => l.transaction_type === 'udhaar_cleared')
         .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
 
+      // Deterministic mathematical formula:
+      // NET UDHAAR DUE = TOTAL GROSS BILLED - (TOTAL ADVANCE PAID + CASH + UPI PAID + TOTAL UDHAAR SETTLED)
       const accurateCurrentDue = Math.max(
         0,
-        Math.round(((totalUdhaarIncurred - totalUdhaarSettled) + Number.EPSILON) * 100) / 100
+        Math.round(((totalGrossBilled - (totalAdvancePaid + totalCashPaid + totalUpiPaid + totalUdhaarSettled)) + Number.EPSILON) * 100) / 100
       );
+
+      const totalUdhaarIncurred = Math.round((accurateCurrentDue + totalUdhaarSettled + Number.EPSILON) * 100) / 100;
 
       if (customer) {
         customer.current_due = accurateCurrentDue;
-        // Keep DB aligned so all screens show the exact verified due
         supabase.from('customers').update({ current_due: accurateCurrentDue }).eq('id', customerId).then(() => {});
       }
 
@@ -4448,13 +4698,19 @@ export const supabaseService = {
       for (const jc of completedCards) {
         const total = Number(jc.total_bill || 0);
         const advance = Number(jc.advance_paid || 0);
-        const cash = Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0);
         const khata = Number(jc.transferred_to_khata || 0);
-        const upi = typeof jc.upi_collected === 'number'
-          ? Number(jc.upi_collected)
-          : Math.max(0, total - advance - cash - khata);
+        const net = Math.max(0, total - advance);
+
+        let cash = Number(jc.cash_collected ?? jc.mandatory_cash_to_collect ?? 0);
+        let upi = Number(jc.upi_collected || 0);
+        const expectedDeliv = Math.max(0, net - khata);
+        if (cash + upi === 0 && expectedDeliv > 0) {
+          if (jc.payment_mode === 'upi' || jc.upi_ref_number) upi = expectedDeliv;
+          else cash = expectedDeliv;
+        }
+
         const date = jc.billed_at || jc.created_at;
-        const invNum = `INV-${jc.id.slice(-4).toUpperCase()}`;
+        const invNum = jc.invoice_number || `INV-${jc.id.slice(-4).toUpperCase()}`;
 
         if (advance > 0 && !seenCardTypes.has(`${jc.id}_advance_paid`)) {
           seenCardTypes.add(`${jc.id}_advance_paid`);
@@ -4566,7 +4822,7 @@ export const supabaseService = {
         jobCards,
         ledgerEntries: cleanEntries,
         metrics: {
-          totalVisits: completedCards.length,
+          totalVisits: completedCards.length + matchingQuickJobs.length,
           totalGrossBilled,
           totalAdvancePaid,
           totalCashPaid,
@@ -4579,6 +4835,160 @@ export const supabaseService = {
     } catch (err) {
       console.error('getCustomer360History error:', err);
       return { customer: null, jobCards: [], ledgerEntries: [] };
+    }
+  },
+
+  // ========================
+  // OWNER-ONLY QUICK JOB EDIT & LIVE RECALCULATION
+  // ========================
+  async ownerQuickEditJobCard(
+    jobCardId: string,
+    shopId: string,
+    data: {
+      customer_name?: string;
+      customer_phone?: string;
+      bike_number?: string;
+      bike_model?: string;
+      odometer_km?: number;
+      status?: JobCard['status'];
+      items?: any[];
+      labour_charge?: number;
+      consumable_charge?: number;
+      outside_work_customer_price?: number;
+      outside_work_shop_cost?: number;
+      outside_work_desc?: string;
+      extra_discount?: number;
+      advance_paid?: number;
+      cash_collected?: number;
+      upi_collected?: number;
+      transferred_to_khata?: number;
+      upi_ref_number?: string | null;
+    },
+    ownerName: string
+  ): Promise<{ success: boolean; jobCard?: JobCard; error?: string }> {
+    try {
+      const items = data.items || [];
+      const partsTotal = items.reduce(
+        (sum, it) => sum + (Number(it.unit_price) || 0) * (Number(it.quantity) || 1),
+        0
+      );
+      const labour = Math.round((Number(data.labour_charge || 0) + Number.EPSILON) * 100) / 100;
+      const outside = Math.round((Number(data.outside_work_customer_price || 0) + Number.EPSILON) * 100) / 100;
+      const consumable = Math.round((Number(data.consumable_charge !== undefined ? data.consumable_charge : 20) + Number.EPSILON) * 100) / 100;
+      const discount = Math.round((Number(data.extra_discount || 0) + Number.EPSILON) * 100) / 100;
+
+      const subtotal = Math.round((partsTotal + labour + outside + consumable + Number.EPSILON) * 100) / 100;
+      const grossTotal = Math.max(0, subtotal - discount);
+
+      const advancePaid = Math.round((Number(data.advance_paid || 0) + Number.EPSILON) * 100) / 100;
+      const cashCollected = Math.round((Number(data.cash_collected || 0) + Number.EPSILON) * 100) / 100;
+      const upiCollected = Math.round((Number(data.upi_collected || 0) + Number.EPSILON) * 100) / 100;
+
+      const netPayable = Math.max(0, grossTotal - advancePaid);
+      const deliveryPaid = cashCollected + upiCollected;
+
+      let transferredToKhata = data.transferred_to_khata !== undefined
+        ? Math.max(0, Math.round((Number(data.transferred_to_khata) + Number.EPSILON) * 100) / 100)
+        : Math.max(0, Math.round((netPayable - deliveryPaid + Number.EPSILON) * 100) / 100);
+
+      const updatePayload: any = {
+        labour_charge: labour,
+        consumable_charge: consumable,
+        outside_work_customer_price: outside,
+        outside_work_shop_cost: Math.round((Number(data.outside_work_shop_cost || 0) + Number.EPSILON) * 100) / 100,
+        outside_work_desc: data.outside_work_desc || '',
+        extra_discount: discount,
+        total_bill: grossTotal,
+        advance_paid: advancePaid,
+        cash_collected: cashCollected,
+        mandatory_cash_to_collect: cashCollected,
+        upi_collected: upiCollected,
+        transferred_to_khata: transferredToKhata,
+        upi_ref_number: data.upi_ref_number || null,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (data.bike_number) updatePayload.bike_number = data.bike_number.trim().toUpperCase();
+      if (data.odometer_km !== undefined) updatePayload.odometer_km = Number(data.odometer_km);
+      if (data.status) updatePayload.status = data.status;
+
+      // 1. Update job card core fields
+      const { data: updatedCard, error: jcErr } = await supabase
+        .from('job_cards')
+        .update(updatePayload)
+        .eq('id', jobCardId)
+        .select('*, items:job_card_items(*), mechanic:users(*)')
+        .single();
+
+      if (jcErr) {
+        console.warn('Update job_cards error in ownerQuickEdit, retrying with core columns:', jcErr);
+      }
+
+      // 2. Update job_card_items: delete existing and reinsert updated items
+      if (items.length > 0) {
+        await supabase.from('job_card_items').delete().eq('job_card_id', jobCardId);
+        const itemsToInsert = items.map((it) => ({
+          shop_id: shopId,
+          job_card_id: jobCardId,
+          part_id: it.part_id || null,
+          item_name: it.item_name || 'Service Item',
+          quantity: Math.max(1, Number(it.quantity || 1)),
+          unit_price: Math.max(0, Number(it.unit_price || 0)),
+          is_unlisted_manual: !!it.is_unlisted_manual,
+          added_by_name: it.added_by_name || ownerName,
+          warranty_months: Number(it.warranty_months || 0),
+          price_pending_inspection: false,
+          created_at: it.created_at || new Date().toISOString(),
+        }));
+        await supabase.from('job_card_items').insert(itemsToInsert);
+      }
+
+      // 3. Update customer info if name or phone changed
+      if (data.customer_name || data.customer_phone) {
+        const custId = updatedCard?.customer_id;
+        if (custId) {
+          const custUpdate: any = {};
+          if (data.customer_name) custUpdate.customer_name = data.customer_name.trim();
+          if (data.customer_phone) custUpdate.phone = data.customer_phone.trim();
+          if (data.bike_number) custUpdate.bike_number = data.bike_number.trim().toUpperCase();
+          if (data.bike_model) custUpdate.bike_model = data.bike_model.trim();
+          await supabase.from('customers').update(custUpdate).eq('id', custId);
+        }
+      }
+
+      // 4. Record audit ledger entry
+      await this.addCreditLedgerEntry({
+        shop_id: shopId,
+        customer_id: updatedCard?.customer_id || 'UNKNOWN',
+        customer_name: data.customer_name || updatedCard?.bike_number,
+        customer_phone: data.customer_phone,
+        bike_number: data.bike_number || updatedCard?.bike_number,
+        job_card_id: jobCardId,
+        invoice_number: updatedCard?.invoice_number || `INV-${jobCardId.slice(-4).toUpperCase()}`,
+        transaction_type: transferredToKhata > 0 ? 'udhaar_incurred' : 'cash_paid',
+        amount: grossTotal,
+        balance_after: transferredToKhata,
+        reference_no: 'OWNER-EDIT',
+        notes: `Quick Job Edit by Owner (${ownerName}): Total ₹${grossTotal}, Paid ₹${advancePaid + deliveryPaid}, Khata ₹${transferredToKhata}`,
+        created_at: new Date().toISOString(),
+      });
+
+      // 5. Reconcile customer balances
+      await this.reconcileShopCustomerBalances(shopId);
+
+      const finalCard = updatedCard || {
+        ...data,
+        id: jobCardId,
+        shop_id: shopId,
+        total_bill: grossTotal,
+        transferred_to_khata: transferredToKhata,
+        items,
+      };
+
+      return { success: true, jobCard: finalCard as JobCard };
+    } catch (err: any) {
+      console.error('ownerQuickEditJobCard error:', err);
+      return { success: false, error: err?.message || 'Failed to edit job card' };
     }
   },
 

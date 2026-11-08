@@ -24,13 +24,18 @@ import {
   Building,
   Copy,
   Check,
+  Edit,
 } from 'lucide-react';
+
+import { User } from '../types/supabase';
 
 interface InvoicePdfModalProps {
   jobCard: JobCard | null;
   shop: Shop | null;
   isOpen: boolean;
   onClose: () => void;
+  currentUser?: User;
+  onOpenQuickEdit?: (card: JobCard) => void;
 }
 
 export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
@@ -38,6 +43,8 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
   shop,
   isOpen,
   onClose,
+  currentUser,
+  onOpenQuickEdit,
 }) => {
   const [qrUrl, setQrUrl] = useState<string>('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
@@ -68,7 +75,7 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
   ) + Number.EPSILON) * 100) / 100;
   const labour = Math.round((Number(jobCard.labour_charge || 0) + Number.EPSILON) * 100) / 100;
   const outside = Math.round((Number(jobCard.outside_work_customer_price || 0) + Number.EPSILON) * 100) / 100;
-  const consumable = Math.round((Number(jobCard.consumable_charge || 0) + Number.EPSILON) * 100) / 100;
+  const consumable = Math.round((Number(jobCard.consumable_charge !== undefined ? jobCard.consumable_charge : 20) + Number.EPSILON) * 100) / 100;
   const discount = Math.round((Number(jobCard.extra_discount || 0) + Number.EPSILON) * 100) / 100;
 
   const subtotal = Math.round((partsTotal + labour + outside + consumable + Number.EPSILON) * 100) / 100;
@@ -76,13 +83,19 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
   const advancePaid = Math.round((Number(jobCard.advance_paid || 0) + Number.EPSILON) * 100) / 100;
   const netPayable = Math.max(0, Math.round((grossBillTotal - advancePaid + Number.EPSILON) * 100) / 100);
 
-  const cashCollected = typeof jobCard.cash_collected === 'number'
-    ? Number(jobCard.cash_collected)
-    : Number(jobCard.mandatory_cash_to_collect || 0);
+  let cashCollected = Number(jobCard.cash_collected ?? jobCard.mandatory_cash_to_collect ?? 0);
+  let upiCollected = Number(jobCard.upi_collected ?? 0);
   const khataDue = Number(jobCard.transferred_to_khata || 0);
-  const upiCollected = typeof jobCard.upi_collected === 'number'
-    ? Number(jobCard.upi_collected)
-    : Math.max(0, netPayable - cashCollected - khataDue);
+
+  const expectedDeliveryPaid = Math.max(0, netPayable - khataDue);
+  if (cashCollected + upiCollected === 0 && expectedDeliveryPaid > 0) {
+    if (jobCard.payment_mode === 'upi' || jobCard.upi_ref_number) {
+      upiCollected = expectedDeliveryPaid;
+    } else {
+      cashCollected = expectedDeliveryPaid;
+    }
+  }
+
   const totalPaid = Math.round((advancePaid + cashCollected + upiCollected + Number.EPSILON) * 100) / 100;
 
   // Generate jsPDF Document
@@ -329,7 +342,7 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+    <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
       <div className="bg-slate-900 border border-slate-700 w-full max-w-3xl rounded-2xl shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
         {/* Top Bar */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/80">
@@ -620,6 +633,21 @@ export const InvoicePdfModal: React.FC<InvoicePdfModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {(currentUser?.role === 'owner' || currentUser?.phone === '9999999999') && onOpenQuickEdit && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenQuickEdit(jobCard);
+                }}
+                className="px-3.5 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition"
+                title="Edit this Job Card (Owner Master Only)"
+              >
+                <Edit className="w-3.5 h-3.5 text-amber-400" />
+                <span>✏️ Quick Job Edit</span>
+              </button>
+            )}
+
             <button
               onClick={() => window.print()}
               className="px-3.5 py-2.5 rounded-xl border border-slate-700 text-slate-200 hover:bg-slate-800 text-xs font-semibold flex items-center gap-1.5 transition"

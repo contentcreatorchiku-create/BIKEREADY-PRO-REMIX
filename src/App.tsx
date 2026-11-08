@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { User, Shop, JobCard } from './types/supabase';
 import { supabaseService, offlineStorage, flushSyncQueue } from './utils/supabaseService';
 import { MechanicDashboard } from './components/MechanicDashboard';
@@ -8,6 +8,7 @@ import { CustomersKhataView } from './components/CustomersKhataView';
 import { InvoicePdfModal } from './components/InvoicePdfModal';
 import { RegisterShopModal } from './components/RegisterShopModal';
 import { LoginModal } from './components/LoginModal';
+import { QuickJobEditModal } from './components/QuickJobEditModal';
 import { NotificationContainer, notify } from './components/NotificationModal';
 import {
   Wrench,
@@ -159,6 +160,7 @@ export default function App() {
 
   // Modals & Direct Login State
   const [invoiceModalCard, setInvoiceModalCard] = useState<JobCard | null>(null);
+  const [quickEditJobCard, setQuickEditJobCard] = useState<JobCard | null>(null);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [loginPhone, setLoginPhone] = useState('');
@@ -174,6 +176,73 @@ export default function App() {
   const [forgotNewPin, setForgotNewPin] = useState('');
   const [forgotMsg, setForgotMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [isResettingPin, setIsResettingPin] = useState(false);
+
+  // Android Hardware Back Button & Mobile Popstate Navigation Controller
+  const lastBackPressTimeRef = useRef<number>(0);
+  useEffect(() => {
+    // Push an initial app state so popstate can intercept back button presses
+    window.history.replaceState({ appBase: true }, '');
+    window.history.pushState({ appScreen: 'main' }, '');
+
+    const handlePopState = () => {
+      // 1. If Quick Job Edit modal is open, close it
+      if (quickEditJobCard) {
+        setQuickEditJobCard(null);
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 2. If Invoice modal is open, close it
+      if (invoiceModalCard) {
+        setInvoiceModalCard(null);
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 3. If Login modal is open, close it
+      if (showLoginModal) {
+        setShowLoginModal(false);
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 5. If Register modal is open, close it
+      if (showRegisterModal) {
+        setShowRegisterModal(false);
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 6. If Forgot Pin modal is open, close it
+      if (showForgotPinModal) {
+        setShowForgotPinModal(false);
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 7. Check if any child modal with [data-modal-open="true"] is open
+      const hasOpenChildModal = document.querySelector('[data-modal-open="true"]');
+      if (hasOpenChildModal) {
+        window.dispatchEvent(new CustomEvent('bikeready_close_active_modal'));
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 8. If on Khata or Owner Master tab, switch to Workbench
+      if (activeTab !== 'workbench') {
+        setActiveTab('workbench');
+        window.history.pushState({ appScreen: 'main' }, '');
+        return;
+      }
+      // 9. If on workbench with no modals open, require double back press within 2s to exit
+      const now = Date.now();
+      if (now - lastBackPressTimeRef.current < 2000) {
+        // Allow exit
+        return;
+      } else {
+        lastBackPressTimeRef.current = now;
+        window.history.pushState({ appScreen: 'main' }, '');
+        notify.alert('Press back again within 2 seconds to exit app', 'BikeReady', 'info');
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [quickEditJobCard, invoiceModalCard, showLoginModal, showRegisterModal, showForgotPinModal, activeTab]);
 
   const handleResetOwnerPinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -651,6 +720,7 @@ export default function App() {
                     currentShop={currentShop}
                     onRefreshData={bootApp}
                     onOpenInvoiceModal={(card) => setInvoiceModalCard(card)}
+                    onOpenQuickEdit={(card) => setQuickEditJobCard(card)}
                   />
                 )}
               </>
@@ -663,6 +733,7 @@ export default function App() {
                 currentUser={currentUser}
                 onRefreshData={bootApp}
                 onOpenInvoiceModal={(card) => setInvoiceModalCard(card)}
+                onOpenQuickEdit={(card) => setQuickEditJobCard(card)}
               />
             )}
 
@@ -673,6 +744,7 @@ export default function App() {
                 currentShop={currentShop}
                 onRefreshData={bootApp}
                 onOpenInvoiceModal={(card) => setInvoiceModalCard(card)}
+                onOpenQuickEdit={(card) => setQuickEditJobCard(card)}
               />
             )}
           </>
@@ -686,6 +758,24 @@ export default function App() {
         shop={currentShop}
         isOpen={!!invoiceModalCard}
         onClose={() => setInvoiceModalCard(null)}
+        currentUser={currentUser || undefined}
+        onOpenQuickEdit={(card) => {
+          setInvoiceModalCard(null);
+          setQuickEditJobCard(card);
+        }}
+      />
+
+      {/* Owner-Only Quick Job Edit Modal */}
+      <QuickJobEditModal
+        isOpen={!!quickEditJobCard}
+        jobCard={quickEditJobCard}
+        currentShop={currentShop}
+        currentUser={currentUser}
+        onClose={() => setQuickEditJobCard(null)}
+        onSaveSuccess={() => {
+          setQuickEditJobCard(null);
+          bootApp();
+        }}
       />
 
       {/* Register New Shop Modal */}
@@ -714,7 +804,7 @@ export default function App() {
 
       {/* 5. FORGOT PIN / PASSWORD RECOVERY MODAL */}
       {showForgotPinModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in">
+        <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in">
           <div className="bg-slate-900 border-2 border-amber-500/50 w-full max-w-md rounded-3xl p-6 shadow-2xl relative text-slate-100 my-auto space-y-4">
             <button
               onClick={() => setShowForgotPinModal(false)}

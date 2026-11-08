@@ -69,6 +69,7 @@ interface ManagerDashboardProps {
   currentShop: Shop;
   onRefreshData: () => void;
   onOpenInvoiceModal: (jobCard: JobCard) => void;
+  onOpenQuickEdit?: (card: JobCard) => void;
 }
 
 export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
@@ -76,6 +77,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   currentShop,
   onRefreshData,
   onOpenInvoiceModal,
+  onOpenQuickEdit,
 }) => {
   const [jobCards, setJobCards] = useState<JobCard[]>([]);
   const [selectedCard, setSelectedCard] = useState<JobCard | null>(null);
@@ -1630,9 +1632,29 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                           >
                             <Eye className="w-3.5 h-3.5" /> Details
                           </button>
+                          {(currentUser.role === 'owner' || currentUser.phone === '9999999999') && onOpenQuickEdit && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenQuickEdit(card)}
+                              className="px-2 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[11px] font-bold border border-amber-500/40 flex items-center gap-1 shadow-sm transition"
+                              title="Owner Quick Job Edit"
+                            >
+                              <Edit className="w-3.5 h-3.5 text-amber-400" /> Quick Edit
+                            </button>
+                          )}
                         </div>
                       ) : (
                         <div className="flex items-center gap-1.5">
+                          {(currentUser.role === 'owner' || currentUser.phone === '9999999999') && onOpenQuickEdit && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenQuickEdit(card)}
+                              className="px-2 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[11px] font-bold border border-amber-500/40 flex items-center gap-1 shadow-sm transition"
+                              title="Owner Quick Job Edit"
+                            >
+                              <Edit className="w-3.5 h-3.5 text-amber-400" /> Quick Edit
+                            </button>
+                          )}
                           <button
                             onClick={(e) => handleOpenEditCard(card, e)}
                             className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs border border-slate-700"

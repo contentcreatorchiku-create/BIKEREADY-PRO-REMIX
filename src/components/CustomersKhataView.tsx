@@ -38,6 +38,7 @@ interface CustomersKhataViewProps {
   currentUser: User;
   onRefreshData: () => void;
   onOpenInvoiceModal?: (card: JobCard) => void;
+  onOpenQuickEdit?: (card: JobCard) => void;
 }
 
 export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
@@ -45,6 +46,7 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
   currentUser,
   onRefreshData,
   onOpenInvoiceModal,
+  onOpenQuickEdit,
 }) => {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [followupJobCards, setFollowupJobCards] = useState<JobCard[]>([]);
@@ -62,8 +64,30 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
   // Payment Settlement Modal
   const [settlingCustomer, setSettlingCustomer] = useState<Customer | null>(null);
   const [settleAmount, setSettleAmount] = useState<number | ''>('');
-  const [settleMode, setSettleMode] = useState<'cash' | 'upi'>('cash');
+  const [settleMode, setSettleMode] = useState<'cash' | 'upi' | 'split'>('cash');
+  const [settleSplitCash, setSettleSplitCash] = useState<number | ''>('');
+  const [settleSplitUpi, setSettleSplitUpi] = useState<number | ''>('');
+  const [settleUtr, setSettleUtr] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Customer 360 History Modal
+  const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
+  const [historyData, setHistoryData] = useState<{
+    customer: Customer | null;
+    jobCards: any[];
+    ledgerEntries: CreditLedgerEntry[];
+    metrics?: {
+      totalVisits: number;
+      totalGrossBilled: number;
+      totalAdvancePaid: number;
+      totalCashPaid: number;
+      totalUpiPaid: number;
+      totalUdhaarIncurred: number;
+      totalUdhaarSettled: number;
+      accurateCurrentDue: number;
+    };
+  } | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   // New Customer Modal
   const [showNewModal, setShowNewModal] = useState(false);
@@ -89,24 +113,41 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
   const [editCreditLimit, setEditCreditLimit] = useState<number>(0);
   const [editNotes, setEditNotes] = useState('');
 
-  // Customer 360 History Modal
-  const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
-  const [historyData, setHistoryData] = useState<{
-    customer: Customer | null;
-    jobCards: any[];
-    ledgerEntries: CreditLedgerEntry[];
-    metrics?: {
-      totalVisits: number;
-      totalGrossBilled: number;
-      totalAdvancePaid: number;
-      totalCashPaid: number;
-      totalUpiPaid: number;
-      totalUdhaarIncurred: number;
-      totalUdhaarSettled: number;
-      accurateCurrentDue: number;
+  // Back button popstate listener for child modals
+  useEffect(() => {
+    const handleCloseModal = () => {
+      if (settlingCustomer) {
+        setSettlingCustomer(null);
+        return;
+      }
+      if (historyCustomer) {
+        setHistoryCustomer(null);
+        setHistoryData(null);
+        loadCustomers();
+        return;
+      }
+      if (editingCustomer) {
+        setEditingCustomer(null);
+        return;
+      }
+      if (showNewModal) {
+        setShowNewModal(false);
+        return;
+      }
+      if (showBroadcastModal) {
+        setShowBroadcastModal(false);
+        return;
+      }
+      if (viewInvoiceCard) {
+        setViewInvoiceCard(null);
+        return;
+      }
     };
-  } | null>(null);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+    window.addEventListener('bikeready_close_active_modal', handleCloseModal);
+    return () => {
+      window.removeEventListener('bikeready_close_active_modal', handleCloseModal);
+    };
+  }, [settlingCustomer, historyCustomer, editingCustomer, showNewModal, showBroadcastModal, viewInvoiceCard]);
 
   const loadCustomers = async () => {
     setLoading(true);
@@ -128,18 +169,36 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
 
     setIsSubmitting(true);
     try {
+      let cashAmt = Number(settleAmount);
+      let upiAmt = 0;
+      if (settleMode === 'upi') {
+        cashAmt = 0;
+        upiAmt = Number(settleAmount);
+      } else if (settleMode === 'split') {
+        cashAmt = Number(settleSplitCash || 0);
+        upiAmt = Number(settleSplitUpi || 0);
+      }
+
       const ok = await supabaseService.recordUdhaarPayment(
         settlingCustomer.id,
         Number(settleAmount),
         settleMode,
         currentShop.id,
-        currentUser.full_name
+        currentUser.full_name,
+        {
+          cashAmount: cashAmt,
+          upiAmount: upiAmt,
+          utrNumber: settleUtr.trim(),
+        }
       );
 
       if (ok) {
         notify.success(`Recorded ₹${settleAmount} payment for ${settlingCustomer.customer_name}!`);
         setSettlingCustomer(null);
         setSettleAmount('');
+        setSettleSplitCash('');
+        setSettleSplitUpi('');
+        setSettleUtr('');
         await loadCustomers();
         onRefreshData();
       }
@@ -554,7 +613,7 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
 
       {/* SETTLE UDHAAR PAYMENT MODAL */}
       {settlingCustomer && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+        <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl shadow-2xl p-6 animate-in fade-in zoom-in-95 duration-150">
             <h3 className="text-base font-bold text-slate-100 mb-1">
               Collect Udhaar Payment
@@ -568,14 +627,29 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setSettleAmount(settlingCustomer.current_due)}
+                  onClick={() => {
+                    setSettleAmount(settlingCustomer.current_due);
+                    if (settleMode === 'split') {
+                      const half = Math.round(settlingCustomer.current_due / 2);
+                      setSettleSplitCash(half);
+                      setSettleSplitUpi(settlingCustomer.current_due - half);
+                    }
+                  }}
                   className="flex-1 py-1 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold text-xs border border-amber-500/40"
                 >
                   Full (₹{settlingCustomer.current_due})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSettleAmount(Math.round(settlingCustomer.current_due / 2))}
+                  onClick={() => {
+                    const half = Math.round(settlingCustomer.current_due / 2);
+                    setSettleAmount(half);
+                    if (settleMode === 'split') {
+                      const qtr = Math.round(half / 2);
+                      setSettleSplitCash(qtr);
+                      setSettleSplitUpi(half - qtr);
+                    }
+                  }}
                   className="flex-1 py-1 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700"
                 >
                   50% (₹{Math.round(settlingCustomer.current_due / 2)})
@@ -592,9 +666,15 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                   min="1"
                   max={settlingCustomer.current_due}
                   value={settleAmount}
-                  onChange={(e) =>
-                    setSettleAmount(e.target.value === '' ? '' : Number(e.target.value))
-                  }
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? '' : Number(e.target.value);
+                    setSettleAmount(val);
+                    if (settleMode === 'split' && val !== '') {
+                      const half = Math.round(Number(val) / 2);
+                      setSettleSplitCash(half);
+                      setSettleSplitUpi(Number(val) - half);
+                    }
+                  }}
                   className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-base font-mono font-bold text-amber-300"
                 />
               </div>
@@ -603,32 +683,116 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
                   Collection Mode
                 </label>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-1.5">
                   <button
                     type="button"
-                    onClick={() => setSettleMode('cash')}
-                    className={`py-2.5 rounded-xl text-xs font-bold border transition ${
+                    onClick={() => {
+                      setSettleMode('cash');
+                      setSettleSplitCash('');
+                      setSettleSplitUpi('');
+                    }}
+                    className={`py-2 px-1 rounded-xl text-[11px] font-bold border transition text-center ${
                       settleMode === 'cash'
-                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-black'
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-black shadow-md'
                         : 'bg-slate-950 text-slate-300 border-slate-800'
                     }`}
                   >
-                    Cash in Drawer
+                    💵 Cash
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSettleMode('upi')}
-                    className={`py-2.5 rounded-xl text-xs font-bold border transition ${
+                    onClick={() => {
+                      setSettleMode('upi');
+                      setSettleSplitCash('');
+                      setSettleSplitUpi('');
+                    }}
+                    className={`py-2 px-1 rounded-xl text-[11px] font-bold border transition text-center ${
                       settleMode === 'upi'
-                        ? 'bg-indigo-500 text-slate-100 border-indigo-400 font-black'
+                        ? 'bg-indigo-500 text-slate-100 border-indigo-400 font-black shadow-md'
                         : 'bg-slate-950 text-slate-300 border-slate-800'
                     }`}
                   >
-                    UPI Direct
+                    📱 UPI
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettleMode('split');
+                      const full = Number(settleAmount || 0);
+                      const half = Math.round(full / 2);
+                      setSettleSplitCash(half);
+                      setSettleSplitUpi(full - half);
+                    }}
+                    className={`py-2 px-1 rounded-xl text-[11px] font-bold border transition text-center ${
+                      settleMode === 'split'
+                        ? 'bg-amber-500 text-slate-950 border-amber-400 font-black shadow-md'
+                        : 'bg-slate-950 text-slate-300 border-slate-800'
+                    }`}
+                  >
+                    ⚡ Split Both
                   </button>
                 </div>
-                <span className="text-[10px] text-slate-500 mt-1 block">
-                  * Automatically synced into Today's Daily Galla Tally
+
+                {settleMode === 'split' && (
+                  <div className="grid grid-cols-2 gap-2 mt-2.5 p-2.5 bg-slate-950/80 rounded-xl border border-slate-800">
+                    <div>
+                      <label className="block text-[10px] font-bold text-emerald-400 mb-1">
+                        Cash in Hand (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max={Number(settleAmount || 0)}
+                        value={settleSplitCash}
+                        onChange={(e) => {
+                          const c = e.target.value === '' ? '' : Number(e.target.value);
+                          setSettleSplitCash(c);
+                          if (c !== '') {
+                            setSettleSplitUpi(Math.max(0, Number(settleAmount || 0) - Number(c)));
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono font-bold text-emerald-300"
+                        placeholder="Cash"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-cyan-400 mb-1">
+                        UPI Online (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max={Number(settleAmount || 0)}
+                        value={settleSplitUpi}
+                        onChange={(e) => {
+                          const u = e.target.value === '' ? '' : Number(e.target.value);
+                          setSettleSplitUpi(u);
+                          if (u !== '') {
+                            setSettleSplitCash(Math.max(0, Number(settleAmount || 0) - Number(u)));
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono font-bold text-cyan-300"
+                        placeholder="UPI"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-2.5">
+                  <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                    UPI Ref / UTR / Cheque No (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 403810283921 / GPay / PhonePe"
+                    value={settleUtr}
+                    onChange={(e) => setSettleUtr(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-xl text-xs font-mono text-slate-200"
+                  />
+                </div>
+
+                <span className="text-[10px] text-slate-500 mt-1.5 block">
+                  * Automatically synced into Today's Daily Galla Tally &amp; Credit Ledger
                 </span>
               </div>
 
@@ -655,7 +819,7 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
 
       {/* CREATE NEW CUSTOMER MODAL */}
       {showNewModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+        <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl shadow-2xl p-6">
             <h3 className="text-base font-bold text-slate-100 mb-3 flex items-center gap-2">
               <Users className="w-4 h-4 text-amber-400" /> Register Customer Profile
@@ -818,7 +982,7 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
 
       {/* EDIT CUSTOMER MODAL */}
       {editingCustomer && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div data-modal-open="true" className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 max-w-md w-full shadow-2xl space-y-4 animate-in fade-in">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
@@ -986,7 +1150,7 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
 
       {/* CUSTOMER 360° HISTORY & MASTER DATA SHEET MODAL */}
       {historyCustomer && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
+        <div data-modal-open="true" className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-6 max-w-5xl w-full max-h-[92vh] overflow-y-auto shadow-2xl space-y-4">
             {/* Modal Header */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-800 pb-4">
@@ -1186,21 +1350,34 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                                 {jc.transferred_to_khata > 0 ? `₹${jc.transferred_to_khata}` : '-'}
                               </td>
                               <td className="py-2.5 px-3 text-center">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (onOpenInvoiceModal) {
-                                      onOpenInvoiceModal(jc);
-                                    } else {
-                                      setViewInvoiceCard(jc);
-                                    }
-                                  }}
-                                  className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1 mx-auto transition"
-                                  title="View and download printable PDF invoice"
-                                >
-                                  <FileText className="w-3 h-3 text-amber-400" />
-                                  <span>📄 PDF</span>
-                                </button>
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (onOpenInvoiceModal) {
+                                        onOpenInvoiceModal(jc);
+                                      } else {
+                                        setViewInvoiceCard(jc);
+                                      }
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1 transition"
+                                    title="View and download printable PDF invoice"
+                                  >
+                                    <FileText className="w-3 h-3 text-amber-400" />
+                                    <span>📄 PDF</span>
+                                  </button>
+                                  {(currentUser?.role === 'owner' || currentUser?.phone === '9999999999') && onOpenQuickEdit && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onOpenQuickEdit(jc)}
+                                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[10px] font-bold flex items-center gap-1 transition"
+                                      title="Owner Quick Job Edit"
+                                    >
+                                      <Edit className="w-3 h-3 text-amber-400" />
+                                      <span>Edit</span>
+                                    </button>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           );
@@ -1360,6 +1537,17 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
                               <span>📄 PDF Invoice</span>
                             </button>
                           )}
+                          {(currentUser?.role === 'owner' || currentUser?.phone === '9999999999') && onOpenQuickEdit && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenQuickEdit(jc)}
+                              className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[10px] font-bold flex items-center gap-1.5 transition ml-1"
+                              title="Owner Quick Job Edit"
+                            >
+                              <Edit className="w-3.5 h-3.5 text-amber-400" />
+                              <span>✏️ Quick Job Edit</span>
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -1447,7 +1635,7 @@ export const CustomersKhataView: React.FC<CustomersKhataViewProps> = ({
 
       {/* 📢 ALL-CUSTOMER BROADCAST & FESTIVAL PROMO ENGINE MODAL */}
       {showBroadcastModal && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
+        <div data-modal-open="true" className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-6 max-w-4xl w-full max-h-[92vh] overflow-y-auto shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">

@@ -17,6 +17,10 @@ import {
   CheckCircle2,
   Minus,
   Sparkles,
+  Settings,
+  Trash2,
+  Edit2,
+  Save,
 } from 'lucide-react';
 
 interface QuickJobBarProps {
@@ -26,19 +30,26 @@ interface QuickJobBarProps {
   isOnDuty?: boolean;
 }
 
-interface QuickServiceDef {
+export interface QuickServiceDef {
   id: string;
   name: string;
-  icon: any;
   defaultPrice: number;
 }
 
 const DEFAULT_SERVICES: QuickServiceDef[] = [
-  { id: 'air', name: 'Air Check (Both Tyres)', icon: Wind, defaultPrice: 10 },
-  { id: 'chain', name: 'Chain Tight / Lube', icon: Wrench, defaultPrice: 30 },
-  { id: 'puncture', name: 'Puncture Repair', icon: Wrench, defaultPrice: 50 },
-  { id: 'wash', name: 'Quick Foam Wash', icon: Droplets, defaultPrice: 100 },
+  { id: 'air', name: 'Air Check (Both Tyres)', defaultPrice: 10 },
+  { id: 'chain', name: 'Chain Tight / Lube', defaultPrice: 30 },
+  { id: 'puncture', name: 'Puncture Repair', defaultPrice: 50 },
+  { id: 'wash', name: 'Quick Foam Wash', defaultPrice: 100 },
 ];
+
+export const getQuickServiceIcon = (name: string) => {
+  const n = name.toLowerCase();
+  if (n.includes('air') || n.includes('nitrogen') || n.includes('tyre') || n.includes('tire')) return Wind;
+  if (n.includes('wash') || n.includes('foam') || n.includes('clean')) return Droplets;
+  if (n.includes('chain') || n.includes('puncture') || n.includes('brake') || n.includes('clutch') || n.includes('oil')) return Wrench;
+  return Zap;
+};
 
 export const QuickJobBar: React.FC<QuickJobBarProps> = ({
   currentUser,
@@ -46,6 +57,34 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
   onJobRecorded,
   isOnDuty = true,
 }) => {
+  const isOwner = currentUser.role === 'owner' || currentUser.phone === '9999999999';
+
+  // Dynamic quick services loaded from local storage for this shop
+  const [services, setServices] = useState<QuickServiceDef[]>(() => {
+    try {
+      const saved = localStorage.getItem(`bikeready_quick_services_${currentShop.id}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return DEFAULT_SERVICES;
+  });
+
+  const saveServices = (newServices: QuickServiceDef[]) => {
+    setServices(newServices);
+    try {
+      localStorage.setItem(`bikeready_quick_services_${currentShop.id}`, JSON.stringify(newServices));
+    } catch {}
+  };
+
+  // Manage Services Modal (Owner Only)
+  const [showManageServicesModal, setShowManageServicesModal] = useState(false);
+  const [newServiceName, setNewServiceName] = useState('');
+  const [newServicePrice, setNewServicePrice] = useState<number | ''>(50);
+  const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
+  const [editingPriceVal, setEditingPriceVal] = useState<number | ''>('');
+
   const [selectedService, setSelectedService] = useState<QuickServiceDef | null>(null);
   const [customServiceName, setCustomServiceName] = useState('');
   const [quickBikeNote, setQuickBikeNote] = useState('');
@@ -59,7 +98,7 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
   const [auditLogs, setAuditLogs] = useState<QuickJob[]>([]);
   const [loadingAudit, setLoadingAudit] = useState(false);
 
-  const isLocked = currentUser.role !== 'owner' && !isOnDuty;
+  const isLocked = !isOwner && !isOnDuty;
 
   // When selected service changes, reset price
   const handleSelectService = (srv: QuickServiceDef) => {
@@ -144,6 +183,58 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
     }
   };
 
+  const handleCreateServicePreset = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newServiceName.trim()) return;
+    const finalPrice = Number(newServicePrice) || 50;
+    const newService: QuickServiceDef = {
+      id: `srv_${Date.now()}`,
+      name: newServiceName.trim(),
+      defaultPrice: finalPrice,
+    };
+    const updated = [...services, newService];
+    saveServices(updated);
+    setNewServiceName('');
+    setNewServicePrice(50);
+    notify.success(`Quick service "${newService.name}" created at ₹${finalPrice}!`);
+  };
+
+  const handleUpdatePresetPrice = (id: string, priceVal: number) => {
+    if (priceVal <= 0) return;
+    const updated = services.map((s) => (s.id === id ? { ...s, defaultPrice: priceVal } : s));
+    saveServices(updated);
+    setEditingServiceId(null);
+    notify.success('Service price updated!');
+  };
+
+  const handleDeleteServicePreset = async (id: string, name: string) => {
+    const ok = await notify.confirm(
+      `Delete Quick Service "${name}"? It will no longer appear on the 1-tap service bar.`
+    );
+    if (!ok) return;
+    const updated = services.filter((s) => s.id !== id);
+    saveServices(updated);
+    if (selectedService?.id === id) {
+      setSelectedService(null);
+    }
+    notify.success(`Deleted quick service "${name}".`);
+  };
+
+  const handleDeleteRecordedQuickJob = async (jobId: string, serviceName: string) => {
+    const ok = await notify.confirm(
+      `Delete & reverse Quick Service "${serviceName}"? This will reverse the money from today's Galla tally.`
+    );
+    if (!ok) return;
+    const success = await supabaseService.deleteQuickJob(jobId);
+    if (success) {
+      setAuditLogs((prev) => prev.filter((item) => item.id !== jobId));
+      onJobRecorded();
+      notify.success('Quick job deleted & reversed from ledger!');
+    } else {
+      notify.error('Failed to delete quick job.');
+    }
+  };
+
   const handleOpenAudit = async () => {
     setShowAuditModal(true);
     setLoadingAudit(true);
@@ -157,14 +248,14 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3.5 shadow-lg">
-      <div className="flex items-center justify-between mb-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold">
             <Zap className="w-4 h-4" />
           </div>
           <div>
             <h3 className="text-xs font-bold text-slate-100 uppercase tracking-wider">
-              Quick Job / Express Cash (₹10 - ₹100)
+              Quick Job / Express Cash ({services.length} Services)
             </h3>
             <p className="text-[11px] text-slate-400">
               No ₹20 consumable fee. Instant cash/UPI with audit tracking.
@@ -172,15 +263,28 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
           </div>
         </div>
 
-        {(currentUser.role === 'owner' || (currentUser.role === 'manager' && !currentUser.is_temp_manager)) && (
-          <button
-            onClick={handleOpenAudit}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition"
-          >
-            <History className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden sm:inline">Anti-Misuse</span> Audit
-          </button>
-        )}
+        <div className="flex items-center gap-1.5">
+          {isOwner && (
+            <button
+              onClick={() => setShowManageServicesModal(true)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs font-bold border border-amber-500/40 transition"
+              title="Owner: Add, set price, or delete Quick Job options"
+            >
+              <Settings className="w-3.5 h-3.5 text-amber-400" />
+              <span>⚙️ Manage Services</span>
+            </button>
+          )}
+
+          {(isOwner || (currentUser.role === 'manager' && !currentUser.is_temp_manager)) && (
+            <button
+              onClick={handleOpenAudit}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition"
+            >
+              <History className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Anti-Misuse</span> Audit
+            </button>
+          )}
+        </div>
       </div>
 
       {isLocked && (
@@ -191,15 +295,15 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
       )}
 
       {/* 1-Tap Service Chips */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        {DEFAULT_SERVICES.map((srv) => {
-          const IconComp = srv.icon;
+      <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
+        {services.map((srv) => {
+          const IconComp = getQuickServiceIcon(srv.name);
           const isSelected = selectedService?.id === srv.id;
           return (
             <button
               key={srv.id}
               onClick={() => handleSelectService(srv)}
-              className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between min-h-[56px] ${
+              className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between min-h-[58px] relative group ${
                 isSelected
                   ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold shadow-md shadow-amber-500/20'
                   : 'bg-slate-950 hover:bg-slate-800/80 border-slate-800 text-slate-200'
@@ -212,7 +316,7 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
                 </span>
               </div>
               <span className="text-xs font-semibold truncate mt-1">
-                {srv.name.split(' ')[0]} {srv.name.split(' ')[1] || ''}
+                {srv.name}
               </span>
             </button>
           );
@@ -220,7 +324,7 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
 
         <button
           onClick={handleOpenCustom}
-          className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between min-h-[56px] ${
+          className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between min-h-[58px] ${
             isCustomMode
               ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold shadow-md shadow-amber-500/20'
               : 'bg-slate-950 hover:bg-slate-800/80 border-dashed border-slate-700 text-slate-300'
@@ -382,7 +486,7 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
 
       {/* Anti-Misuse Audit Modal */}
       {showAuditModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+        <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/60">
               <div className="flex items-center gap-2">
@@ -450,10 +554,23 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
                           </div>
                         </div>
 
-                        <div className="text-right sm:self-center font-mono font-bold text-base">
-                          <span className={isMod ? 'text-rose-400 font-black' : 'text-emerald-400'}>
-                            ₹{log.final_price}
-                          </span>
+                        <div className="flex items-center gap-3 sm:self-center">
+                          <div className="text-right font-mono font-bold text-base">
+                            <span className={isMod ? 'text-rose-400 font-black' : 'text-emerald-400'}>
+                              ₹{log.final_price}
+                            </span>
+                          </div>
+                          {isOwner && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteRecordedQuickJob(log.id, log.service_name)}
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[11px] font-bold transition flex items-center gap-1 shrink-0"
+                              title="Delete & reverse quick job from drawer and ledger"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                              <span>Delete</span>
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
@@ -468,6 +585,193 @@ export const QuickJobBar: React.FC<QuickJobBarProps> = ({
                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
               >
                 Close Audit Log
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Owner: Manage Quick Services Modal */}
+      {showManageServicesModal && (
+        <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-700 w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden max-h-[88vh] flex flex-col">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/80">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold">
+                  <Settings className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                    Manage Quick Job Services
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Create new quick services, set prices, and delete unwanted options
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowManageServicesModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-5 flex-1">
+              {/* Form: Add New Quick Service */}
+              <form onSubmit={handleCreateServicePreset} className="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-3">
+                <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Plus className="w-3.5 h-3.5" /> + Create New Quick Service
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                      Service Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Nitrogen Air, Spark Plug Clean, Bulb"
+                      value={newServiceName}
+                      onChange={(e) => setNewServiceName(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                      Price (₹) *
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      min="1"
+                      step="5"
+                      value={newServicePrice}
+                      onChange={(e) => setNewServicePrice(e.target.value === '' ? '' : Number(e.target.value))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs font-mono font-bold text-amber-300 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs shadow-md transition flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add to Service Bar
+                  </button>
+                </div>
+              </form>
+
+              {/* Active Services List */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Active Services ({services.length})
+                  </h4>
+                  <span className="text-[10px] text-slate-500">
+                    Changes reflect immediately on the workbench
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  {services.map((srv) => {
+                    const IconComp = getQuickServiceIcon(srv.name);
+                    const isEditing = editingServiceId === srv.id;
+
+                    return (
+                      <div
+                        key={srv.id}
+                        className="p-3 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between gap-3 text-xs hover:border-slate-700 transition"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-xl bg-amber-500/15 text-amber-400 flex items-center justify-center shrink-0">
+                            <IconComp className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <span className="font-bold text-slate-200 block truncate">
+                              {srv.name}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              ID: {srv.id}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {isEditing ? (
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-bold text-amber-400">₹</span>
+                              <input
+                                type="number"
+                                min="1"
+                                step="5"
+                                value={editingPriceVal}
+                                onChange={(e) => setEditingPriceVal(e.target.value === '' ? '' : Number(e.target.value))}
+                                className="w-20 px-2 py-1 bg-slate-900 border border-amber-500 rounded-lg text-xs font-mono font-bold text-amber-300 text-right"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleUpdatePresetPrice(srv.id, Number(editingPriceVal))}
+                                className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 text-xs font-bold"
+                                title="Save new price"
+                              >
+                                <Save className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingServiceId(null)}
+                                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 text-xs"
+                                title="Cancel"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <span className="px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 text-amber-300 font-mono font-bold text-xs">
+                                ₹{srv.defaultPrice}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingServiceId(srv.id);
+                                  setEditingPriceVal(srv.defaultPrice);
+                                }}
+                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs border border-slate-700 transition"
+                                title="Edit default price"
+                              >
+                                <Edit2 className="w-3.5 h-3.5 text-amber-400" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteServicePreset(srv.id, srv.name)}
+                                className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs transition"
+                                title="Delete this quick service"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-950 flex items-center justify-between">
+              <span className="text-[11px] text-slate-400">
+                Tip: You can set any price for these services when billing.
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowManageServicesModal(false)}
+                className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition"
+              >
+                Done
               </button>
             </div>
           </div>

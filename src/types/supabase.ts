@@ -250,6 +250,10 @@ export interface DailyGallaTally {
   jobCardUpi: number;
   quickJobCash: number;
   quickJobUpi: number;
+  advanceCash?: number;
+  advanceUpi?: number;
+  udhaarSettlementCash: number;
+  udhaarSettlementUpi: number;
   totalCashIn: number;
   totalUpiIn: number;
   shopExpenses: number;

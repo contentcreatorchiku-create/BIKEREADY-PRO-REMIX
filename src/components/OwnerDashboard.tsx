@@ -79,6 +79,7 @@ import {
   Trash2,
   UserCheck,
   UserX,
+  Zap,
 } from 'lucide-react';
 
 interface OwnerDashboardProps {
@@ -86,6 +87,7 @@ interface OwnerDashboardProps {
   currentShop: Shop;
   onRefreshData: () => void;
   onOpenInvoiceModal: (jobCard: JobCard) => void;
+  onOpenQuickEdit?: (card: JobCard) => void;
 }
 
 export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
@@ -93,6 +95,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
   currentShop,
   onRefreshData,
   onOpenInvoiceModal,
+  onOpenQuickEdit,
 }) => {
   const isSuperAdmin = currentUser.phone === '9999999999';
   const [activeTab, setActiveTab] = useState<'galla' | 'inventory' | 'distributors' | 'staff' | 'reminders' | 'reports' | 'settings' | 'saas_seller'>(() => {
@@ -269,6 +272,14 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
   const [settingsRecoverySecret, setSettingsRecoverySecret] = useState(currentShop.recovery_secret || '');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSavedMsg, setSettingsSavedMsg] = useState(false);
+
+  // Owner Quick Job Creation State
+  const [showOwnerCreateQuickJobModal, setShowOwnerCreateQuickJobModal] = useState(false);
+  const [ownerQjServiceName, setOwnerQjServiceName] = useState('');
+  const [ownerQjPrice, setOwnerQjPrice] = useState<number | ''>(50);
+  const [ownerQjNote, setOwnerQjNote] = useState('');
+  const [ownerQjPaymentMode, setOwnerQjPaymentMode] = useState<'cash' | 'upi'>('cash');
+  const [isSubmittingOwnerQj, setIsSubmittingOwnerQj] = useState(false);
 
   // Today Expenses List for Galla Audit & Reversals
   const [todayExpenses, setTodayExpenses] = useState<ShopExpense[]>([]);
@@ -809,6 +820,46 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
       notify.success('Quick service reversed from ledger!');
     } else {
       notify.error('Failed to reverse quick job.');
+    }
+  };
+
+  const handleOwnerCreateQuickJob = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!ownerQjServiceName.trim() || !ownerQjPrice || Number(ownerQjPrice) <= 0) {
+      notify.alert('Please enter a service name and valid price.', 'Quick Job Error', 'error');
+      return;
+    }
+    setIsSubmittingOwnerQj(true);
+    try {
+      const finalPrice = Number(ownerQjPrice);
+      const fullServiceName = ownerQjNote.trim()
+        ? `${ownerQjServiceName.trim()} (${ownerQjNote.trim()})`
+        : ownerQjServiceName.trim();
+
+      const res = await supabaseService.recordQuickJob(
+        currentShop.id,
+        currentUser.id,
+        currentUser.full_name,
+        fullServiceName,
+        finalPrice,
+        finalPrice,
+        ownerQjPaymentMode
+      );
+
+      if (res) {
+        notify.success(`Quick Job "${fullServiceName}" of ₹${finalPrice} recorded via ${ownerQjPaymentMode.toUpperCase()}!`);
+        setShowOwnerCreateQuickJobModal(false);
+        setOwnerQjServiceName('');
+        setOwnerQjPrice(50);
+        setOwnerQjNote('');
+        setOwnerQjPaymentMode('cash');
+        await loadData();
+        onRefreshData();
+      } else {
+        notify.error('Failed to record quick job.');
+      }
+    } finally {
+      setIsSubmittingOwnerQj(false);
     }
   };
 
@@ -1761,6 +1812,16 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
                   <span>Quick Job Express Cash:</span>
                   <span className="font-mono font-bold">₹{gallaTally?.quickJobCash || 0}</span>
                 </div>
+                <div className="flex justify-between text-emerald-300 font-bold">
+                  <span>Udhaar Settlement Cash Received:</span>
+                  <span className="font-mono">₹{gallaTally?.udhaarSettlementCash || 0}</span>
+                </div>
+                {gallaTally?.advanceCash ? (
+                  <div className="flex justify-between text-blue-300 font-bold">
+                    <span>Advance Cash at Intake (+):</span>
+                    <span className="font-mono">₹{gallaTally.advanceCash}</span>
+                  </div>
+                ) : null}
                 {gallaTally?.scrapIncome ? (
                   <div className="flex justify-between text-emerald-300 font-bold">
                     <span>Scrap / Old Oil Sale (+):</span>
@@ -1790,13 +1851,28 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
               </div>
             </div>
 
-            <div className="mt-3 flex items-center justify-between p-3 rounded-xl bg-emerald-950/40 border border-emerald-600/40">
-              <span className="font-bold text-emerald-200">
-                Physical Cash in Cash Drawer Right Now:
-              </span>
-              <span className="text-xl font-mono font-black text-emerald-400">
-                ₹{gallaTally?.netCashInGalla || 0}
-              </span>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+              <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-950/40 border border-emerald-600/40">
+                <span className="font-bold text-emerald-200">
+                  Physical Cash in Cash Drawer (Galla):
+                </span>
+                <span className="text-xl font-mono font-black text-emerald-400">
+                  ₹{gallaTally?.netCashInGalla || 0}
+                </span>
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-xl bg-indigo-950/40 border border-indigo-600/40">
+                <div className="space-y-0.5">
+                  <span className="font-bold text-indigo-200 block text-xs">
+                    Total UPI Collected:
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    JC: ₹{gallaTally?.jobCardUpi || 0} • Quick: ₹{gallaTally?.quickJobUpi || 0} • Udhaar: ₹{gallaTally?.udhaarSettlementUpi || 0}
+                  </span>
+                </div>
+                <span className="text-xl font-mono font-black text-indigo-400">
+                  ₹{gallaTally?.totalUpiIn || 0}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -1870,6 +1946,125 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
               </div>
             )}
           </div>
+
+          {/* TODAY'S RECORDED QUICK JOBS EXPRESS CARD */}
+          {(() => {
+            const todayQuickJobs = allQuickJobs.filter((q) => {
+              const d = new Date(q.created_at);
+              const now = new Date();
+              return (
+                d.getDate() === now.getDate() &&
+                d.getMonth() === now.getMonth() &&
+                d.getFullYear() === now.getFullYear()
+              );
+            });
+            const todayQuickCash = todayQuickJobs.filter(q => q.payment_mode === 'cash').reduce((sum, q) => sum + (q.final_price || 0), 0);
+            const todayQuickUpi = todayQuickJobs.filter(q => q.payment_mode === 'upi').reduce((sum, q) => sum + (q.final_price || 0), 0);
+
+            return (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 mb-6 shadow-xl">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                      <Zap className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-white flex items-center gap-2">
+                        Today's Recorded Quick Jobs Express
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono">
+                          {todayQuickJobs.length} Today
+                        </span>
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Total Express: <strong className="text-emerald-400">₹{todayQuickCash + todayQuickUpi}</strong> (💵 Cash: ₹{todayQuickCash} | 📱 UPI: ₹{todayQuickUpi})
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOwnerQjServiceName('Puncture Repair');
+                      setOwnerQjPrice(50);
+                      setOwnerQjNote('');
+                      setOwnerQjPaymentMode('cash');
+                      setShowOwnerCreateQuickJobModal(true);
+                    }}
+                    className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs shadow-md transition"
+                  >
+                    <Plus className="w-4 h-4" />
+                    + Create Quick Job
+                  </button>
+                </div>
+
+                {todayQuickJobs.length === 0 ? (
+                  <div className="text-center py-8 text-slate-500 text-xs">
+                    No quick jobs recorded today. Click "+ Create Quick Job" or use the top Quick Service Bar.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase text-[10px] tracking-wider">
+                          <th className="p-2.5">Service & Note</th>
+                          <th className="p-2.5">Mode</th>
+                          <th className="p-2.5 text-right">Price</th>
+                          <th className="p-2.5">Mechanic / Staff</th>
+                          <th className="p-2.5">Time</th>
+                          <th className="p-2.5 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {todayQuickJobs.map((q) => (
+                          <tr key={q.id} className="hover:bg-slate-800/40 transition">
+                            <td className="p-2.5 font-medium text-white flex items-center gap-2">
+                              <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <span>{q.service_name}</span>
+                            </td>
+                            <td className="p-2.5">
+                              {q.payment_mode === 'cash' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                                  💵 Cash In Galla
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/15 text-sky-400 border border-sky-500/30">
+                                  📱 UPI Direct
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-2.5 text-right font-bold text-emerald-400 font-mono">
+                              ₹{q.final_price}
+                              {q.default_price && q.default_price !== q.final_price && (
+                                <span className="block text-[9px] text-amber-400 font-normal">
+                                  Mod from ₹{q.default_price}
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-2.5 text-slate-300">
+                              {q.worker_name || 'Owner'}
+                            </td>
+                            <td className="p-2.5 text-slate-400 font-mono text-[11px]">
+                              {formatCCTVTimestamp(q.created_at).substring(11)}
+                            </td>
+                            <td className="p-2.5 text-right">
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteQuickJob(q.id, q.service_name)}
+                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-400 border border-slate-700 transition"
+                                title="Reverse & Delete this Quick Job"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* COMPLETE TIME-STAMPED WORKSHOP PASSBOOK & CASHFLOW LEDGER */}
           {(() => {
@@ -4582,6 +4777,179 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
                   className="flex-1 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold disabled:opacity-40 transition"
                 >
                   {isAdminResettingPin ? 'Resetting...' : 'Save Owner PIN'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* OWNER: CREATE & RECORD QUICK JOB MODAL */}
+      {showOwnerCreateQuickJobModal && (
+        <div data-modal-open="true" className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">
+                    + Record Quick Job Express
+                  </h3>
+                  <p className="text-[11px] text-slate-400">Owner instant billing to Cash Drawer or UPI</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOwnerCreateQuickJobModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Quick 1-Tap Presets */}
+            <div>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
+                ⚡ Fast Presets (1-Tap Fill)
+              </label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                {[
+                  { name: 'Air Check (Both Tyres)', price: 10 },
+                  { name: 'Chain Tight / Lube', price: 30 },
+                  { name: 'Puncture Repair', price: 50 },
+                  { name: 'Quick Foam Wash', price: 100 },
+                  { name: 'Brake Tight / Adjust', price: 50 },
+                  { name: 'Oil Top-Up / Check', price: 80 },
+                ].map((preset) => (
+                  <button
+                    key={preset.name}
+                    type="button"
+                    onClick={() => {
+                      setOwnerQjServiceName(preset.name);
+                      setOwnerQjPrice(preset.price);
+                    }}
+                    className={`p-2 rounded-xl text-left border text-xs transition ${
+                      ownerQjServiceName === preset.name
+                        ? 'bg-amber-500/20 border-amber-500 text-amber-300 font-bold'
+                        : 'bg-slate-800/80 border-slate-700/80 text-slate-300 hover:bg-slate-800 hover:border-slate-600'
+                    }`}
+                  >
+                    <div className="truncate text-[11px]">{preset.name}</div>
+                    <div className="text-[10px] text-emerald-400 font-mono font-bold">₹{preset.price}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <form onSubmit={handleOwnerCreateQuickJob} className="space-y-3 pt-1">
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                  Service / Job Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={ownerQjServiceName}
+                  onChange={(e) => setOwnerQjServiceName(e.target.value)}
+                  placeholder="e.g. Front Tyre Puncture, Air Check, Wash"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] font-bold text-slate-300">
+                    Price (₹) *
+                  </label>
+                  <div className="flex gap-1">
+                    {[-20, -10, +10, +20, +50].map((delta) => (
+                      <button
+                        key={delta}
+                        type="button"
+                        onClick={() => {
+                          const curr = Number(ownerQjPrice) || 0;
+                          const nextVal = Math.max(0, curr + delta);
+                          setOwnerQjPrice(nextVal);
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono border border-slate-700 transition"
+                      >
+                        {delta > 0 ? `+${delta}` : delta}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  value={ownerQjPrice}
+                  onChange={(e) => setOwnerQjPrice(e.target.value === '' ? '' : Number(e.target.value))}
+                  placeholder="50"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-lg font-bold font-mono text-emerald-400 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                  Optional Note / Bike Number
+                </label>
+                <input
+                  type="text"
+                  value={ownerQjNote}
+                  onChange={(e) => setOwnerQjNote(e.target.value)}
+                  placeholder="e.g. MH12AB1234 or Front Wheel"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                  Payment Mode
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOwnerQjPaymentMode('cash')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition ${
+                      ownerQjPaymentMode === 'cash'
+                        ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400 shadow-sm'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    💵 Cash in Galla
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOwnerQjPaymentMode('upi')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition ${
+                      ownerQjPaymentMode === 'upi'
+                        ? 'bg-sky-500/20 border-sky-500 text-sky-400 shadow-sm'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    📱 UPI Direct
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowOwnerCreateQuickJobModal(false)}
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!ownerQjServiceName.trim() || !ownerQjPrice || isSubmittingOwnerQj}
+                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-slate-950 text-xs font-bold disabled:opacity-40 transition shadow-lg shadow-emerald-500/20"
+                >
+                  {isSubmittingOwnerQj
+                    ? 'Recording...'
+                    : `Record Quick Job (₹${ownerQjPrice || 0})`}
                 </button>
               </div>
             </form>
